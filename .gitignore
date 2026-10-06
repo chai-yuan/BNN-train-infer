@@ -1,0 +1,15 @@
+data/
+
+bnn-MNIST-MLP
+bnn-MNIST-CNN
+*.o
+*.out
+*.bin
+*.bnn
+
+__pycache__/
+*.py[cod]
+
+.vscode/
+.idea/
+.DS_Store
