@@ -1,4 +1,5 @@
 data/
+local-notes/
 
 bnn-MNIST-MLP
 bnn-MNIST-CNN
