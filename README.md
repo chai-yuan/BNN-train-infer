@@ -1,0 +1,124 @@
+# BNN 训练与推理加速器原型
+
+本项目探索面向硬件的 **W1A8 二值神经网络推理**：权重符号用 1 bit 表示，激活量化为 int8，
+每组权重共享 FP16 scale，组内进行整数点积、组间使用 FP32 累加。
+通过 Python 训练与导出、C 推理引擎和软件模拟加速器，评估这种计算方式的精度、性能与适用范围，
+为后续硬件接口和架构设计提供依据。
+
+## 当前进度
+
+目前处于 **C 软件模拟与能力评估阶段**，尚未实现硬件后端。
+
+- 已支持 MNIST MLP、MNIST CNN 和 nanoGPT 的训练导出及 C 推理。
+- 已将三种模型迁入 `bnn-sw`，统一使用不透明 `BNNE_Engine` 句柄和 `bnn-infer` 演示入口。
+- 二值矩阵计算统一通过 `bnn-accelerator.h`；当前由软件实现模拟设备。
+- 已提供 Python logits 正确性校验与分阶段性能统计，不再维护新引擎内的独立参考内核。
+- 已通过合成模型数值回归、错误路径、多句柄隔离及内存检查；现有小型 GPT 模型已通过 Python reference 校验。
+
+原有三个独立 C 演示源码暂时保留用于回归，新入口不依赖它们。
+真实模型的精度与性能应结合各自的数据集评估；软件后端的时间不能直接代表未来硬件性能。
+
+## 项目结构
+
+```text
+train-*-export.py       Python 训练、模型导出和参考数据生成
+bnn-infer.c            统一演示入口：分类、生成、校验与统计
+bnn-sw/                BNNE 引擎、模型加载、工作区和前向实现
+bnn-accelerator/       设备级公共接口及软件模拟后端
+tests/                 离线回归测试（无需训练或下载数据）
+doc/                   引擎接口及 BNN1、GPT1 文件格式说明
+hw/                    后续硬件实现预留目录
+```
+
+调用关系：`应用 → BNNE 引擎 → accelerator 接口 → 软件模拟 / 后续硬件后端`。
+
+## 构建与使用
+
+C 端需要支持 C99 的编译器、Make、`ar` 和 POSIX 单调时钟；当前主要在 Linux 上使用。
+
+```bash
+make ACCE=soft
+```
+
+生成 `./bnn-infer` 和 `build/soft/libbnn-engine.a`。目前只支持 `ACCE=soft`，表示链接软件模拟设备，
+不是另一套参考推理算法。新入口没有 `--soft` 参数。
+
+### MNIST MLP / CNN
+
+两个模型使用相同命令，通过模型文件自动区分类型：
+
+```bash
+./bnn-infer --profile --ref ref_logits.bin model.bnn \
+    data/MNIST/raw/t10k-images-idx3-ubyte \
+    data/MNIST/raw/t10k-labels-idx1-ubyte
+```
+
+CNN 将模型路径替换为 `model-cnn.bnn`，并使用对应的 reference 文件。
+省略 `--ref` 时仅做分类评测；省略 `--profile` 时不采集和显示性能统计。
+输入需要解压后的 IDX 文件。reference 必须对应这份测试集的前 N 张图片及其原始顺序。
+
+### nanoGPT
+
+```bash
+# 仅与 Python logits 比较
+./bnn-infer --profile --ref ref_logits.bin nanogpt-lib.bnn
+
+# 贪心生成，每步对最近的上下文重新前向
+./bnn-infer --profile --prompt '春天' --steps 40 nanogpt-lib.bnn
+
+# 验证集 next-token 评测：loss、perplexity、top1
+./bnn-infer --profile --eval val_tokens.bin nanogpt-lib.bnn
+```
+
+只指定 `--ref` 或 `--eval` 不会自动生成文本；没有指定任何任务时默认从“春天”生成 40 个 token。
+模型、reference、tokens 必须配套使用。任何文件、推理或正确性校验失败均返回非零退出码。
+
+### 训练与导出
+
+Python 训练需要 `torch`、`numpy`，MNIST 另外需要 `torchvision`。
+训练脚本会下载 MNIST；GPT 可使用内置语料或通过 `--data` 指定文本。
+
+```bash
+python3 train-MNIST-MLP-export.py --out model.bnn
+mv ref_logits.bin ref-mlp.bin
+
+python3 train-MNIST-CNN-export.py --out model-cnn.bnn
+mv ref_logits.bin ref-cnn.bin
+
+python3 train-nanoGPT-export.py --out nanogpt.bnn \
+    --ref-out ref-gpt.bin --tokens-out val-gpt.bin
+```
+
+MLP/CNN 脚本都写入当前目录的 `ref_logits.bin`，应及时另存以免覆盖。
+完整训练参数可通过各脚本的 `--help` 查看；GPT 与 C 对比时保留默认量化注意力，勿使用 `--no-attn-quant`。
+模型与参考数据通常由本地训练生成，不要求提交到仓库。
+
+## 测试与性能统计
+
+```bash
+make ACCE=soft test
+```
+
+测试仅依赖 Python 3 标准库和 C 构建工具，会在临时目录生成模型与数据，
+检查三种模型的独立 Python 参考结果、旧演示迁移一致性、动态序列、输入校验、资源回收、统计和多句柄隔离。
+无需 PyTorch、真实模型、网络或训练；这类回归不能替代真实数据集的精度测试。
+
+`--profile` 分别报告加载、校验、评测、生成的耗时；推理内部细分量化、传输、设备执行和其余主机工作，
+并统计设备调用数、传输字节及有效/补齐后 MAC。MAC 仅计卸载的矩阵运算。
+各阶段独立累计，软件模拟中的传输主要是内存复制，不等同真实 DMA。
+
+## 当前限制与后续安排
+
+当前软件设备的 group 为 128，最大输入和输出维度均为 4096。
+CNN 按逐组补齐后的尺寸检查；GPT 要求 head size=128、`4*C <= 4096` 且词表不大于 4096。
+仓库已有的 `nanogpt-lib.bnn` 可运行；`nanogpt_l3_b48.bnn` 的词表为 6362，当前会返回不支持。
+暂不提供矩阵分块、异步调度、KV cache 或多种采样策略，优先保持实现简单。
+
+后续按以下顺序推进：
+
+1. 用配套训练模型与真实数据建立精度、延迟、传输量和补齐开销基线。
+2. 根据测量结果确定硬件的分组、矩阵规模、缓冲及传输能力，再决定是否需要分块等扩展。
+3. 实现硬件后端，复用现有 accelerator 接口和 Python reference 完成验证，再做针对性优化。
+
+嵌入调用、张量与所有权约定见 [BNNE 引擎说明](doc/bnn-engine.md)；
+格式说明见 [BNN1](doc/bnn-file.md) 和 [GPT1](doc/gpt-file.md)。
