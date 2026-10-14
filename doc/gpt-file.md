@@ -1,7 +1,7 @@
 # GPT1 文件格式
 
 `GPT1` 是最小 nanoGPT 演示（中文单汉字分词）的部署格式：**W1 权重（±1 + FP16 组 scale）+ int8 激活**。
-由 `train-nanoGPT-export.py::export()` 写出，`bnn-nanoGPT.c::load_model()` 读取。
+由 `train-nanoGPT-export.py::export()` 写出，`bnn-sw` 引擎（`BNNE_Open`）读取。
 
 与 `BNN1`（MNIST MLP）的区别：权重仍是 `sign bit + FP16 组 scale`，但去掉了折叠 BN 的
 `post_a/post_b`（这里用 RMSNorm，逐 token 归一化无法折叠），并额外带上 embedding、RMSNorm gain 和 UTF-8 词表。

@@ -1,7 +1,7 @@
 # BNN1 文件格式
 
 `.bnn` 是 W1A8 MNIST MLP 的部署格式：**±1 权重 + int8 激活**，权重每 `group` 个共享一个 FP16 scale。
-由 `train-MNIST-MLP-export.py::export()` 写出，`bnn-MNIST-MLP.c::load_model()` 读取。
+由 `train-MNIST-MLP-export.py::export()` 写出，`bnn-sw` 引擎（`BNNE_Open`）读取。
 
 ## 约定
 

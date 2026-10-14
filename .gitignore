@@ -1,9 +1,6 @@
 data/
 local-notes/
 
-bnn-MNIST-MLP
-bnn-MNIST-CNN
-bnn-nanoGPT
 bnn-infer
 build/
 *.o

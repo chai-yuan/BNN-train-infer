@@ -1,9 +1,9 @@
 # BNNE 推理引擎
 
 `bnn-sw/bnn-engine.h` 是唯一公共入口，支持 BNN1 MLP、BNN2 CNN、GPT1 nanoGPT。
-引擎负责加载模型、管理设备与工作区、前向执行和统计；`bnn-infer.c` 负责数据读取、
-MNIST 评测、GPT 生成/验证集评测、Python reference 校验及报告。
-原有三个独立 C 演示保留，便于迁移回归，新程序不依赖它们。
+引擎负责加载模型、管理设备与工作区、前向执行和统计；`bnn-infer.c` 按两类任务组织演示：
+分类（MNIST 评测）与文本生成（GPT 生成/验证集评测），Python reference 校验和性能统计
+是两类任务共用的选项。
 
 ## 构建
 
@@ -32,7 +32,7 @@ make ACCE=soft test
 
 引擎通过模型 magic 区分 MLP/CNN。CLI 读取 28x28 IDX 图像与标签，按训练时的
 `(pixel/255 - 0.1307)/0.3081` 归一化；MLP 额外补零至输入宽度。
-省略 `--ref` 时只做分类评测，也兼容将 reference 路径放在两个 IDX 路径后。
+省略 `--ref` 时只做分类评测；reference 一律通过 `--ref` 传入。
 
 MNIST reference 格式沿用导出脚本：小端 uint32 `N,10`，随后 FP32 `[N,10]` logits，
 对应 IDX 数据的前 N 项，必须与导出 reference 时的图片顺序一致。
@@ -54,7 +54,7 @@ MLP/CNN 脚本默认使用相同 reference 文件名，使用时应分别保存�
 
 GPT reference 格式为小端 uint32 `n,V`，随后 int32 IDs `[n]` 与 FP32 logits `[n,V]`。
 校验所有位置的最大相对误差（容差 `1e-2`）及 argmax 一致性。
-兼容 `model.bnn ref_logits.bin [val_tokens.bin]` 位置参数，但推荐明确使用 `--ref` / `--eval`。
+reference 与验证集一律通过 `--ref` / `--eval` 传入，位置参数只有模型路径本身。
 
 不指定 reference、eval 或生成选项时，默认从“春天”生成 40 个 token。
 指定 `--prompt` 或 `--steps` 才会在校验/评测之外额外生成。
@@ -89,6 +89,14 @@ OptionsInit → Open → GetModelInfo → GetOutputDesc → Run（可重复）�
 | MLP | FP32 `[in_features]` | FP32 `[out_features]` |
 | CNN | FP32 CHW `[1,28,28]` | FP32 `[out_features]` |
 | GPT | int32 `[n]`，`1 <= n <= T` | FP32 `[n,V]` |
+| LLaMA | int32 `[n]`，`1 <= n <= T` | FP32 `[n,V]` |
+
+### KV Cache 与自回归单步解码
+
+针对生成式语言模型（GPT 与 LLaMA），引擎提供增量单步解码接口：
+- `BNNE_ResetKVCache(engine)`：重置当前模型的 KV Cache 游标。
+- `BNNE_StepToken(engine, token, pos, out_logits)`：单步解码。将当前 `token` 在位置 `pos` 的 Key 与 Value 写入缓存，Query 仅与缓存中的历史 Key（位置 `0..pos`）进行注意力计算，输出当前位置的 `out_logits`（长度 `[V]`）。
+- CLI 工具 `bnn-infer` 支持 `--kv-cache` 开关。开启后，Prefill 阶段将 Prompt 顺序注入缓存，Decode 阶段进行单步增量计算，将自回归解码算力与带宽开销大幅降低，且与全上下文重计算保持严格数值一致。
 
 GPT `GetModelInfo` 中的 input/output 描述是最大序列长度；实际序列由 `GetOutputDesc` 查询。
 IDs 须满足 `0 <= id < V`。`GetToken` 返回 GPT 词表的借用 NUL 结尾 UTF-8 字符串，直到 Close 有效。

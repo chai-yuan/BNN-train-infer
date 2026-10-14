@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Offline MLP/CNN/GPT migration regression using only the Python standard library.
+"""Offline MLP/CNN/GPT regression using only the Python standard library.
 
 Run from any directory:
     python3 tests/test_mlp.py --binary ./bnn-infer --library build/soft/libbnn-engine.a
 
 All generated models, IDX data, references and executables live in a temporary
-folder. --sanitize builds the API runner and old CLI with ASan/UBSan; build the
-engine archive with the same sanitizers to inspect its partial-load cleanup too.
+folder. --sanitize builds the API runner with ASan/UBSan; build the engine
+archive with the same sanitizers to inspect its partial-load cleanup too.
 """
 
 import argparse
@@ -513,30 +513,25 @@ def cli_metrics(output):
     return (int(accuracy[2]), int(accuracy[3])), float(error[1]), error[2]
 
 
-def cli_regression(binary, legacy, folder, correct, count, env):
+def cli_regression(binary, folder, correct, count, env):
     paths = [folder / "mnist.bnn", folder / "images.idx", folder / "labels.idx"]
-    old_outputs = {}
-    for flags in ([], ["--soft"]):
-        output = run([legacy, *flags, *paths, folder / "ref.bin"], env)
+    output = run([binary, *paths], env)
+    match = re.search(r"C inference accuracy:\s*([\d.]+)\s*\((\d+)/(\d+)\)", output)
+    assert match and (int(match[2]), int(match[3])) == (correct, count), output
+    assert "C vs Python reference" not in output, output
+    for flags in ([], ["--profile"]):
+        output = run([binary, *flags, "--ref", folder / "ref.bin", *paths], env)
         accuracy, error, verdict = cli_metrics(output)
         assert accuracy == (correct, count), output
         assert error <= 2e-6 and verdict == "OK", output
-        old_outputs[bool(flags)] = (accuracy, error)
-    for flags in ([], ["--profile"]):
-        output = run([binary, *flags, *paths, folder / "ref.bin"], env)
-        accuracy, error, verdict = cli_metrics(output)
-        assert accuracy == old_outputs["--soft" in flags][0], output
-        assert error <= 2e-6 and verdict == "OK", output
-        print(f"CLI {' '.join(flags) or 'accelerator'}: {correct}/{count}, oracle error {error:.2e}")
+        print(f"CLI {' '.join(flags) or 'default'}: {correct}/{count}, oracle error {error:.2e}")
         if flags:
             assert profile_calls(output) == {"eval": count, "check": count}, output
     run([binary, "--soft", *paths], env, expected_returncode=1)
-    for executable in (legacy, binary):
-        output = run([executable, *(["--soft"] if executable == legacy else []),
-                      *paths, folder / "wrong-ref.bin"], env,
-                     expected_returncode=0 if executable == legacy else 1)
-        _, error, verdict = cli_metrics(output)
-        assert error > 0.1 and verdict == "MISMATCH", output
+    output = run([binary, "--ref", folder / "wrong-ref.bin", *paths], env,
+                 expected_returncode=1)
+    _, error, verdict = cli_metrics(output)
+    assert error > 0.1 and verdict == "MISMATCH", output
 
 
 def profile_calls(output):
@@ -544,22 +539,16 @@ def profile_calls(output):
             re.findall(r"profile (\w+):.*forward_calls=(\d+)", output)}
 
 
-def other_cli_regression(binary, legacy_cnn, legacy_gpt, folder, generated, model, eval_ids, env):
+def other_cli_regression(binary, folder, generated, model, eval_ids, env):
     paths = [folder / "cnn.bnn", folder / "cnn-images.idx", folder / "cnn-labels.idx"]
-    for executable, flags in ((legacy_cnn, []), (legacy_cnn, ["--soft"]),
-                              (binary, []), (binary, ["--profile"])):
-        output = run([executable, *flags, *paths, folder / "cnn-ref.bin"], env)
+    for flags in ([], ["--profile"]):
+        output = run([binary, *flags, "--ref", folder / "cnn-ref.bin", *paths], env)
         accuracy, error, verdict = cli_metrics(output)
         assert accuracy == (2, 2) and error <= 2e-6 and verdict == "OK", output
         if flags == ["--profile"]:
             assert profile_calls(output) == {"eval": 2, "check": 2}, output
-    old = run([legacy_gpt, "--soft", "--steps", 0, folder / "gpt.bnn",
-               folder / "gpt-logits.bin"], env)
-    assert "C vs python ref:" in old and "MISMATCH" not in old, old
-    for flags, positional in (([], False), (["--profile"], False), (["--profile"], True)):
-        args = [folder / "gpt.bnn", folder / "gpt-logits.bin"] if positional else [
-            "--ref", folder / "gpt-logits.bin", folder / "gpt.bnn"]
-        output = run([binary, *flags, *args], env)
+    for flags in ([], ["--profile"]):
+        output = run([binary, *flags, "--ref", folder / "gpt-logits.bin", folder / "gpt.bnn"], env)
         assert "C vs Python reference:" in output and "MISMATCH" not in output, output
         assert "generate:" not in output and "token eval:" not in output, output
         if flags:
@@ -568,13 +557,16 @@ def other_cli_regression(binary, legacy_cnn, legacy_gpt, folder, generated, mode
         expected_returncode=1)
     run([binary, "--ref", folder / "gpt-bad-ids.bin", folder / "gpt.bnn"], env,
         expected_returncode=1)
-    output = run([binary, "--profile", "--prompt", "春天word", "--steps", 6,
+    output = run([binary, "--profile", "--prompt", "春天word", "--steps", "6",
                   folder / "gpt.bnn"], env)
     assert f"generate: {generated}\n" in output and profile_calls(output) == {"generate": 6}, output
     # Reference/eval and explicit generation run only their requested phases.
-    output = run([binary, "--profile", "--ref", folder / "gpt-logits.bin", "--steps", 1,
+    output = run([binary, "--profile", "--ref", folder / "gpt-logits.bin", "--steps", "1",
                   folder / "gpt.bnn"], env)
     assert profile_calls(output) == {"check": 1, "generate": 1}, output
+    output = run([binary, "--profile", "--ref", folder / "gpt-logits.bin", "--eval",
+                  folder / "gpt-eval.bin", folder / "gpt.bnn"], env)
+    assert profile_calls(output) == {"check": 1, "eval": 2}, output
     output = run([binary, "--profile", folder / "gpt.bnn"], env)
     assert "generate: 春天" in output and profile_calls(output) == {"generate": 40}, output
     expected_loss, correct, count = 0.0, 0, 0
@@ -584,20 +576,17 @@ def other_cli_regression(binary, legacy_cnn, legacy_gpt, folder, generated, mode
             expected_loss += peak - row[target] + math.log(sum(math.exp(v-peak) for v in row))
             correct += max(range(len(row)), key=lambda i: row[i]) == target
             count += 1
-    for positional in (False, True):
-        args = [folder / "gpt.bnn", folder / "gpt-logits.bin", folder / "gpt-eval.bin"] if positional else [
-            "--eval", folder / "gpt-eval.bin", folder / "gpt.bnn"]
-        output = run([binary, "--profile", *args], env)
-        result = re.search(r"C token eval: (\d+) positions, loss ([\d.]+), perplexity ([\d.]+), top1 ([\d.]+)", output)
-        assert result and int(result[1]) == count, output
-        assert abs(float(result[2])-expected_loss/count) < 1e-4, output
-        assert abs(float(result[3])-math.exp(expected_loss/count)) < 5e-4, output
-        assert abs(float(result[4])-correct/count) < 1e-4, output
-        assert "generate:" not in output, output
-        assert profile_calls(output) == ({"check": 1, "eval": 2} if positional else {"eval": 2}), output
+    output = run([binary, "--profile", "--eval", folder / "gpt-eval.bin", folder / "gpt.bnn"], env)
+    result = re.search(r"C token eval: (\d+) positions, loss ([\d.]+), perplexity ([\d.]+), top1 ([\d.]+)", output)
+    assert result and int(result[1]) == count, output
+    assert abs(float(result[2])-expected_loss/count) < 1e-4, output
+    assert abs(float(result[3])-math.exp(expected_loss/count)) < 5e-4, output
+    assert abs(float(result[4])-correct/count) < 1e-4, output
+    assert "generate:" not in output, output
+    assert profile_calls(output) == {"eval": 2}, output
     for stem in ("cnn", "gpt"):
         run([binary, "--soft", folder / f"{stem}.bnn"], env, expected_returncode=1)
-    print("CNN/GPT CLI: Python oracle, old CLI, ref/eval action selection, greedy generation and profile OK")
+    print("CNN/GPT CLI: Python oracle, ref/eval/generate task selection and profile OK")
 
 
 def main():
@@ -606,7 +595,7 @@ def main():
     parser.add_argument("--library", type=Path, default=ROOT / "build/soft/libbnn-engine.a")
     parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
     parser.add_argument("--sanitize", action="store_true", help="ASan/UBSan for temporary executables")
-    parser.add_argument("--api-only", action="store_true", help="skip CLI migration comparison")
+    parser.add_argument("--api-only", action="store_true", help="skip CLI regression")
     parser.add_argument("--fixtures-only", type=Path, help="generate fixtures at this directory without compiling")
     args = parser.parse_args()
     if args.fixtures_only:
@@ -617,7 +606,7 @@ def main():
     library, binary = args.library.resolve(), args.binary.resolve()
     assert library.is_file(), f"build the engine archive first: {library}"
     if not args.api_only:
-        assert binary.is_file(), f"build the migrated CLI first: {binary}"
+        assert binary.is_file(), f"build the bnn-infer CLI first: {binary}"
     compiler = shlex.split(args.cc)
     flags = ["-std=c99", "-O2", "-Wall", "-Wextra"]
     flags += shlex.split(os.environ.get("CFLAGS", ""))
@@ -637,16 +626,9 @@ def main():
         print(run([runner, folder], env).strip())
         print(f"Failed-load matrix: {bad_count} malformed/missing/unsupported models, two repetitions")
         if not args.api_only:
-            legacy = folder / "legacy-mlp"
-            run([*compiler, *flags, "-I", ROOT, ROOT / "bnn-MNIST-MLP.c",
-                 ROOT / "bnn-accelerator/soft-bnn-accelerator.c", *link_flags, "-lm", "-o", legacy], env)
-            cli_regression(binary, legacy, folder, correct, count, env)
-            legacy_cnn, legacy_gpt = folder / "legacy-cnn", folder / "legacy-gpt"
-            for source, executable in (("bnn-MNIST-CNN.c", legacy_cnn), ("bnn-nanoGPT.c", legacy_gpt)):
-                run([*compiler, *flags, "-I", ROOT, ROOT / source,
-                     ROOT / "bnn-accelerator/soft-bnn-accelerator.c", *link_flags, "-lm", "-o", executable], env)
-            other_cli_regression(binary, legacy_cnn, legacy_gpt, folder, generated, gpt, eval_ids, env)
-    print("MLP/CNN/GPT migration regressions passed (no downloads or training dependencies)")
+            cli_regression(binary, folder, correct, count, env)
+            other_cli_regression(binary, folder, generated, gpt, eval_ids, env)
+    print("MLP/CNN/GPT regressions passed (no downloads or training dependencies)")
 
 
 if __name__ == "__main__":

@@ -37,6 +37,9 @@ typedef struct {
     float* row_scales;
     uint8_t* query_bits;
     uint16_t* query_scales;
+    float* key_cache;
+    float* value_cache;
+    uint32_t cache_pos;
 } GPT_Model;
 
 /* Dimensions are validated before multiplying counts; also guard byte sizes. */
@@ -75,6 +78,8 @@ static void gpt_destroy(BNNE_Engine engine) {
     free(model->row_scales);
     free(model->query_bits);
     free(model->query_scales);
+    free(model->key_cache);
+    free(model->value_cache);
     free(model);
     engine->model = NULL;
 }
@@ -269,7 +274,13 @@ static BNNE_Status gpt_prepare(BNNE_Engine engine) {
     model->row_scales = gpt_alloc(model->length, sizeof(float));
     model->query_bits = gpt_alloc(model->length, model->group / 8);
     model->query_scales = gpt_alloc(model->length, sizeof(uint16_t));
-    if (!model->quantized || !model->row_scales || !model->query_bits || !model->query_scales)
+
+    size_t cache_elements = (size_t)model->layers * model->length * model->channels;
+    model->key_cache = gpt_alloc(cache_elements, sizeof(float));
+    model->value_cache = gpt_alloc(cache_elements, sizeof(float));
+
+    if (!model->quantized || !model->row_scales || !model->query_bits || !model->query_scales ||
+        !model->key_cache || !model->value_cache)
         return BNNE_ENOMEM;
     return bnne_runtime_buffers(engine, (size_t)model->length * max_in,
                                 (size_t)model->length * max_out * sizeof(float));
@@ -495,10 +506,173 @@ static BNNE_Status gpt_token(BNNE_Engine engine, uint32_t id, const char** out_t
     return BNNE_OK;
 }
 
+static BNNE_Status gpt_reset_cache(BNNE_Engine engine) {
+    GPT_Model* model = engine->model;
+    if (model)
+        model->cache_pos = 0;
+    return BNNE_OK;
+}
+
+static BNNE_Status gpt_step(BNNE_Engine engine, int32_t token, uint32_t pos,
+                            float* out_logits, BNNE_Stats* stats) {
+    GPT_Model* model = engine->model;
+    uint32_t C = model->channels, G = model->group, H = model->heads;
+    if (pos >= model->length)
+        return bnne_error(engine, BNNE_ERANGE, "GPT position exceeds max sequence length");
+    if (pos == 0)
+        model->cache_pos = 0;
+
+    /* 1. Embedding lookup for current single token (rows = 1) */
+    for (uint32_t c = 0; c < C; c++)
+        model->work[X][c] = model->tokens[(size_t)token * C + c] + model->positions[(size_t)pos * C + c];
+
+    for (uint32_t l = 0; l < model->layers; l++) {
+        GPT_Block* block = &model->blocks[l];
+
+        BNNE_Status status = gpt_norm(engine, block->gain[0], 1);
+        if (status != BNNE_OK)
+            return status;
+
+        for (uint32_t w = WQ; w <= WV; w++) {
+            status = gpt_linear(engine, &block->weights[w], model->work[NORM], 1,
+                                model->work[Q + w], stats);
+            if (status != BNNE_OK)
+                return status;
+        }
+
+        /* 存储 K 和 V 到缓存 */
+        size_t cache_offset = ((size_t)l * model->length + pos) * C;
+        memcpy(model->key_cache + cache_offset, model->work[K], C * sizeof(float));
+        memcpy(model->value_cache + cache_offset, model->work[V], C * sizeof(float));
+
+        /* Attention 计算：Query 为当前 1 个 Token，Key 为历史缓存 0..pos 共 (pos+1) 个 Token */
+        uint32_t seq_len = pos + 1;
+        float divisor = sqrtf((float)G);
+
+        for (uint32_t h = 0; h < H; h++) {
+            uint64_t start = engine->options.enable_profile ? bnne_now_ns() : 0;
+
+            for (uint32_t t = 0; t < seq_len; t++) {
+                size_t k_src = ((size_t)l * model->length + t) * C + h * G;
+                status = bnne_quantize(model->key_cache + k_src, G,
+                                       model->quantized + (size_t)t * G, &model->row_scales[t]);
+                if (status != BNNE_OK)
+                    return bnne_error(engine, status, "cannot quantize cached key");
+            }
+
+            float* q_vec = model->work[Q] + h * G;
+            float sum = 0.0f;
+            memset(model->query_bits, 0, G / 8);
+            for (uint32_t j = 0; j < G; j++) {
+                float q_val = q_vec[j];
+                sum += fabsf(q_val);
+                if (q_val >= 0.0f)
+                    model->query_bits[j >> 3] |= (uint8_t)(1u << (j & 7));
+            }
+            model->query_scales[0] = gpt_fp32_to_fp16(sum / (float)G);
+            if (!isfinite(bnne_fp16_to_fp32(model->query_scales[0])))
+                return bnne_error(engine, BNNE_ECOMPUTE, "GPT query scale NaN or Inf");
+
+            if (engine->options.enable_profile)
+                stats->quantize_ns += bnne_now_ns() - start;
+
+            BNN_MatrixDesc desc = {
+                .in_features = G, .out_features = 1, .group_size = G,
+                .weight_bits = model->query_bits, .weight_bytes = G / 8,
+                .scale_fp16 = model->query_scales, .scale_count = 1,
+            };
+            BNN_Matrix matrix = NULL;
+            start = engine->options.enable_profile ? bnne_now_ns() : 0;
+            status = bnne_accel_status(engine,
+                BNN_MatrixCreate(engine->device, &desc, &matrix), "BNN_MatrixCreate(GPT query step)");
+            if (engine->options.enable_profile)
+                stats->transfer_ns += bnne_now_ns() - start;
+
+            if (status == BNNE_OK)
+                status = bnne_runtime_gemm(engine, matrix, model->quantized, seq_len, G,
+                                           model->work[SCORES], 1, stats);
+
+            start = engine->options.enable_profile ? bnne_now_ns() : 0;
+            BNN_MatrixDestroy(matrix);
+            if (engine->options.enable_profile)
+                stats->transfer_ns += bnne_now_ns() - start;
+            if (status != BNNE_OK)
+                return status;
+
+            if (engine->options.enable_profile) {
+                uint64_t macs = (uint64_t)seq_len * 1 * G;
+                stats->logical_macs += macs;
+                stats->executed_macs += macs;
+            }
+
+            float maximum = -INFINITY;
+            for (uint32_t t = 0; t < seq_len; t++) {
+                float score = model->work[SCORES][t] * model->row_scales[t] / divisor;
+                if (!isfinite(score))
+                    return bnne_error(engine, BNNE_ECOMPUTE, "GPT attention score NaN or Inf");
+                model->work[SCORES][t] = score;
+                if (score > maximum)
+                    maximum = score;
+            }
+            float sum_exp = 0.0f;
+            for (uint32_t t = 0; t < seq_len; t++) {
+                float prob = expf(model->work[SCORES][t] - maximum);
+                model->work[PROBS][t] = prob;
+                sum_exp += prob;
+            }
+            for (uint32_t t = 0; t < seq_len; t++)
+                model->work[PROBS][t] /= sum_exp;
+
+            for (uint32_t j = 0; j < G; j++) {
+                float val = 0.0f;
+                for (uint32_t t = 0; t < seq_len; t++) {
+                    size_t v_src = ((size_t)l * model->length + t) * C + h * G + j;
+                    val += model->work[PROBS][t] * model->value_cache[v_src];
+                }
+                model->work[Y][h * G + j] = val;
+            }
+        }
+
+        status = gpt_linear(engine, &block->weights[WO], model->work[Y], 1, model->work[O], stats);
+        if (status != BNNE_OK)
+            return status;
+
+        for (uint32_t c = 0; c < C; c++)
+            model->work[X][c] += model->work[O][c];
+
+        status = gpt_norm(engine, block->gain[1], 1);
+        if (status != BNNE_OK)
+            return status;
+
+        status = gpt_linear(engine, &block->weights[WFC], model->work[NORM], 1, model->work[FF], stats);
+        if (status != BNNE_OK)
+            return status;
+        status = gpt_linear(engine, &block->weights[WPROJ], model->work[FF], 1, model->work[O], stats);
+        if (status != BNNE_OK)
+            return status;
+
+        for (uint32_t c = 0; c < C; c++)
+            model->work[X][c] += model->work[O][c];
+    }
+
+    BNNE_Status status = gpt_norm(engine, model->gain, 1);
+    if (status != BNNE_OK)
+        return status;
+
+    status = gpt_linear(engine, &model->head, model->work[NORM], 1, out_logits, stats);
+    if (status != BNNE_OK)
+        return status;
+
+    model->cache_pos = pos + 1;
+    return BNNE_OK;
+}
+
 const BNNE_ModelOps bnne_gpt_ops = {
     .load = gpt_load,
     .prepare = gpt_prepare,
     .run = gpt_run,
     .destroy = gpt_destroy,
     .token = gpt_token,
+    .step = gpt_step,
+    .reset_cache = gpt_reset_cache,
 };

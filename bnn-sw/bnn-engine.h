@@ -18,7 +18,7 @@ typedef enum {
     BNNE_ERANGE = -4, BNNE_EIO = -5, BNNE_EFORMAT = -6, BNNE_ECOMPUTE = -7
 } BNNE_Status;
 typedef enum { BNNE_F32 = 1, BNNE_I32 = 2 } BNNE_DType;
-typedef enum { BNNE_MODEL_MLP = 1, BNNE_MODEL_CNN = 2, BNNE_MODEL_GPT = 3 } BNNE_ModelKind;
+typedef enum { BNNE_MODEL_MLP = 1, BNNE_MODEL_CNN = 2, BNNE_MODEL_GPT = 3, BNNE_MODEL_LLAMA = 4 } BNNE_ModelKind;
 
 typedef struct {
     BNNE_DType dtype;
@@ -79,8 +79,16 @@ BNNE_Status BNNE_GetOutputDesc(BNNE_Engine engine, const BNNE_TensorDesc* input,
  * 参数检查失败不修改输出；计算失败时输出内容不作保证。
  */
 BNNE_Status BNNE_Run(BNNE_Engine engine, const BNNE_Tensor* input, BNNE_Tensor* output);
-/* 仅 GPT 支持，返回 NUL 结尾的借用 UTF-8 字符串，直到 Close 有效，不得 free。 */
+/* 仅 GPT/Llama 支持，返回 NUL 结尾的借用 UTF-8 字符串，直到 Close 有效，不得 free。 */
 BNNE_Status BNNE_GetToken(BNNE_Engine engine, uint32_t id, const char** out_text);
+/* 重置或清空当前引擎的 KV Cache 状态。清空后，下次调用解码时从 pos=0 开始。 */
+BNNE_Status BNNE_ResetKVCache(BNNE_Engine engine);
+/* 步骤式单 token 解码（KV Cache 模式）：
+ * token: 当前单步输入 token ID (0 <= token < vocabulary_size)。
+ * pos: 当前 token 在序列中的位置 (0 <= pos < max_sequence_length)。若 pos==0 自动重置缓存。
+ * out_logits: 接收当前 token 产生的 FP32 logits [vocabulary_size]。
+ */
+BNNE_Status BNNE_StepToken(BNNE_Engine engine, int32_t token, uint32_t pos, float* out_logits);
 BNNE_Status BNNE_GetStats(BNNE_Engine engine, BNNE_Stats* out_stats);
 /* 清除推理累计，保留 load_ns；关闭 profile 时所有统计字段均为零。 */
 BNNE_Status BNNE_ResetStats(BNNE_Engine engine);

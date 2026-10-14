@@ -9,20 +9,21 @@
 
 目前处于 **C 软件模拟与能力评估阶段**，尚未实现硬件后端。
 
-- 已支持 MNIST MLP、MNIST CNN 和 nanoGPT 的训练导出及 C 推理。
-- 已将三种模型迁入 `bnn-sw`，统一使用不透明 `BNNE_Engine` 句柄和 `bnn-infer` 演示入口。
+- 已支持 MNIST MLP、MNIST CNN、nanoGPT 以及 Llama-2 的训练导出及 C 推理。
+- 已将模型统一定义在 `bnn-sw`，使用不透明 `BNNE_Engine` 句柄和 `bnn-infer` 演示入口（支持 GPT1 与 LMA1 两类 LLM 格式）。
 - 二值矩阵计算统一通过 `bnn-accelerator.h`；当前由软件实现模拟设备。
 - 已提供 Python logits 正确性校验与分阶段性能统计，不再维护新引擎内的独立参考内核。
 - 已通过合成模型数值回归、错误路径、多句柄隔离及内存检查；现有小型 GPT 模型已通过 Python reference 校验。
 
-原有三个独立 C 演示源码暂时保留用于回归，新入口不依赖它们。
+推理入口围绕两类任务组织：分类（MLP/CNN，输入数据、输出类别）和文本生成（GPT，输入提示、输出文本）；
+logits 校验与性能统计是两类任务共用的选项。
 真实模型的精度与性能应结合各自的数据集评估；软件后端的时间不能直接代表未来硬件性能。
 
 ## 项目结构
 
 ```text
 train-*-export.py       Python 训练、模型导出和参考数据生成
-bnn-infer.c            统一演示入口：分类、生成、校验与统计
+bnn-infer.c            统一演示入口：分类与文本生成两类任务，附校验与统计
 bnn-sw/                BNNE 引擎、模型加载、工作区和前向实现
 bnn-accelerator/       设备级公共接口及软件模拟后端
 tests/                 离线回归测试（无需训练或下载数据）
@@ -57,17 +58,20 @@ CNN 将模型路径替换为 `model-cnn.bnn`，并使用对应的 reference 文�
 省略 `--ref` 时仅做分类评测；省略 `--profile` 时不采集和显示性能统计。
 输入需要解压后的 IDX 文件。reference 必须对应这份测试集的前 N 张图片及其原始顺序。
 
-### nanoGPT
+### LLM (nanoGPT & Llama-2)
 
 ```bash
 # 仅与 Python logits 比较
 ./bnn-infer --profile --ref ref_logits.bin nanogpt-lib.bnn
 
-# 贪心生成，每步对最近的上下文重新前向
+# 贪心生成（默认全上下文前向）
 ./bnn-infer --profile --prompt '春天' --steps 40 nanogpt-lib.bnn
 
+# 开启 KV Cache 单步自回归生成（获得十倍以上解码加速）
+./bnn-infer --profile --kv-cache --prompt '春天' --steps 40 llama2.bnn
+
 # 验证集 next-token 评测：loss、perplexity、top1
-./bnn-infer --profile --eval val_tokens.bin nanogpt-lib.bnn
+./bnn-infer --profile --eval val_tokens.bin llama2.bnn
 ```
 
 只指定 `--ref` 或 `--eval` 不会自动生成文本；没有指定任何任务时默认从“春天”生成 40 个 token。
@@ -87,6 +91,9 @@ mv ref_logits.bin ref-cnn.bin
 
 python3 train-nanoGPT-export.py --out nanogpt.bnn \
     --ref-out ref-gpt.bin --tokens-out val-gpt.bin
+
+python3 train-llama2-export.py --out llama2.bnn \
+    --ref-out ref-llama.bin --tokens-out val-llama.bin
 ```
 
 MLP/CNN 脚本都写入当前目录的 `ref_logits.bin`，应及时另存以免覆盖。
@@ -100,7 +107,8 @@ make ACCE=soft test
 ```
 
 测试仅依赖 Python 3 标准库和 C 构建工具，会在临时目录生成模型与数据，
-检查三种模型的独立 Python 参考结果、旧演示迁移一致性、动态序列、输入校验、资源回收、统计和多句柄隔离。
+检查三种模型的独立 Python 参考结果、两类任务（分类评测、生成/验证集评测）、
+动态序列、输入校验、资源回收、统计和多句柄隔离。
 无需 PyTorch、真实模型、网络或训练；这类回归不能替代真实数据集的精度测试。
 
 `--profile` 分别报告加载、校验、评测、生成的耗时；推理内部细分量化、传输、设备执行和其余主机工作，
@@ -121,4 +129,4 @@ CNN 按逐组补齐后的尺寸检查；GPT 要求 head size=128、`4*C <= 4096`
 3. 实现硬件后端，复用现有 accelerator 接口和 Python reference 完成验证，再做针对性优化。
 
 嵌入调用、张量与所有权约定见 [BNNE 引擎说明](doc/bnn-engine.md)；
-格式说明见 [BNN1](doc/bnn-file.md) 和 [GPT1](doc/gpt-file.md)。
+格式说明见 [BNN1](doc/bnn-file.md)、[GPT1](doc/gpt-file.md) 和 [LMA1](doc/llama-file.md)。

@@ -50,6 +50,8 @@ BNNE_Status BNNE_Open(const char* model_path, const BNNE_Options* options, BNNE_
             engine->ops = &bnne_cnn_ops;
         else if (memcmp(magic, "GPT1", 4) == 0)
             engine->ops = &bnne_gpt_ops;
+        else if (memcmp(magic, "LMA1", 4) == 0)
+            engine->ops = &bnne_llama_ops;
         status = engine->ops ? engine->ops->load(engine, file) : BNNE_ENOTSUP;
     }
     if (fclose(file) != 0 && status == BNNE_OK)
@@ -87,10 +89,10 @@ BNNE_Status BNNE_GetOutputDesc(BNNE_Engine engine, const BNNE_TensorDesc* input,
                               BNNE_TensorDesc* out_output) {
     if (!engine || !input || !out_output)
         return BNNE_EINVAL;
-    if (engine->info.kind == BNNE_MODEL_GPT) {
+    if (engine->info.kind == BNNE_MODEL_GPT || engine->info.kind == BNNE_MODEL_LLAMA) {
         if (input->dtype != BNNE_I32 || input->rank != 1 || input->dims[0] == 0 ||
             input->dims[0] > engine->info.max_sequence_length)
-            return bnne_error(engine, BNNE_EINVAL, "GPT input must be I32 [n], 1 <= n <= context length");
+            return bnne_error(engine, BNNE_EINVAL, "LLM input must be I32 [n], 1 <= n <= context length");
         *out_output = engine->info.output;
         out_output->dims[0] = input->dims[0];
     } else {
@@ -179,6 +181,52 @@ BNNE_Status BNNE_GetToken(BNNE_Engine engine, uint32_t id, const char** out_text
     if (id >= engine->info.vocabulary_size)
         return BNNE_ERANGE;
     return engine->ops->token(engine, id, out_text);
+}
+
+BNNE_Status BNNE_ResetKVCache(BNNE_Engine engine) {
+    if (!engine)
+        return BNNE_EINVAL;
+    if (engine->ops && engine->ops->reset_cache)
+        return engine->ops->reset_cache(engine);
+    return BNNE_OK;
+}
+
+BNNE_Status BNNE_StepToken(BNNE_Engine engine, int32_t token, uint32_t pos, float* out_logits) {
+    if (!engine || !out_logits)
+        return BNNE_EINVAL;
+    if (token < 0 || (uint32_t)token >= engine->info.vocabulary_size ||
+        pos >= engine->info.max_sequence_length)
+        return bnne_error(engine, BNNE_ERANGE, "token ID or position out of range");
+    if (!engine->ops || !engine->ops->step)
+        return bnne_error(engine, BNNE_ENOTSUP, "model does not support KV cache step decoding");
+
+    uint64_t start = engine->options.enable_profile ? bnne_now_ns() : 0;
+    BNNE_Stats step_stats = {0};
+    BNNE_Status status = engine->ops->step(engine, token, pos, out_logits, &step_stats);
+    if (status != BNNE_OK)
+        return status;
+
+    if (engine->options.enable_profile) {
+        step_stats.forward_calls = 1;
+        step_stats.total_ns = bnne_now_ns() - start;
+        uint64_t sum_stages = step_stats.quantize_ns + step_stats.transfer_ns + step_stats.execute_ns;
+        step_stats.host_ns = step_stats.total_ns > sum_stages ? step_stats.total_ns - sum_stages : 0;
+
+#define ACCUMULATE(field) engine->stats.field += step_stats.field
+        ACCUMULATE(forward_calls);
+        ACCUMULATE(total_ns);
+        ACCUMULATE(quantize_ns);
+        ACCUMULATE(transfer_ns);
+        ACCUMULATE(execute_ns);
+        ACCUMULATE(host_ns);
+        ACCUMULATE(device_calls);
+        ACCUMULATE(bytes_written);
+        ACCUMULATE(bytes_read);
+        ACCUMULATE(logical_macs);
+        ACCUMULATE(executed_macs);
+#undef ACCUMULATE
+    }
+    return BNNE_OK;
 }
 
 BNNE_Status BNNE_GetStats(BNNE_Engine engine, BNNE_Stats* out_stats) {

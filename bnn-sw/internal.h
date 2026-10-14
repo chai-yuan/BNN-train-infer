@@ -13,6 +13,9 @@ typedef struct {
                        BNNE_Tensor* output, BNNE_Stats* stats);
     void (*destroy)(BNNE_Engine engine);
     BNNE_Status (*token)(BNNE_Engine engine, uint32_t id, const char** out_text);
+    BNNE_Status (*step)(BNNE_Engine engine, int32_t token, uint32_t pos,
+                        float* out_logits, BNNE_Stats* stats);
+    BNNE_Status (*reset_cache)(BNNE_Engine engine);
 } BNNE_ModelOps;
 
 struct bnne_engine {
@@ -36,6 +39,7 @@ typedef struct {
 extern const BNNE_ModelOps bnne_mlp_ops;
 extern const BNNE_ModelOps bnne_cnn_ops;
 extern const BNNE_ModelOps bnne_gpt_ops;
+extern const BNNE_ModelOps bnne_llama_ops;
 
 BNNE_Status bnne_error(BNNE_Engine engine, BNNE_Status status, const char* format, ...);
 BNNE_Status bnne_accel_status(BNNE_Engine engine, BNN_Status status, const char* operation);
