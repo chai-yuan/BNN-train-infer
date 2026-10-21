@@ -1,0 +1,1798 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>同一条 API，换一颗心脏 · bnn-accelerator 的 Verilator 切换</title>
+<style>
+:root{
+  --paper:#f6f2ea;
+  --paper-2:#eee8dc;
+  --card:#fffdf8;
+  --ink:#18191c;
+  --muted:#5f6167;
+  --line:#d9d1c3;
+  --soft:#2457d6;
+  --soft-bg:#e9eefc;
+  --rtl:#b64a12;
+  --rtl-bg:#fbede2;
+  --green:#0e7467;
+  --green-bg:#e7f3ef;
+  --amber:#d99a2b;
+  --code:#1b1c1f;
+  --code-bar:#24252a;
+  --code-ink:#eae7df;
+  --mono:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --shadow:0 20px 60px rgba(45,35,20,.10);
+  --radius:18px;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:88px}
+body{
+  margin:0;color:var(--ink);background:var(--paper);
+  font-family:var(--sans);font-size:16px;line-height:1.75;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+}
+body::before{
+  content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:
+    radial-gradient(900px 520px at 88% -8%,rgba(182,74,18,.10),transparent 62%),
+    radial-gradient(760px 440px at -6% 12%,rgba(36,87,214,.07),transparent 60%),
+    linear-gradient(180deg,rgba(255,255,255,.28),transparent 24%);
+}
+::selection{background:#f2cf95;color:#20180c}
+a{color:inherit}
+code,pre{font-family:var(--mono)}
+:not(pre)>code{
+  background:#e9e2d6;border-radius:5px;padding:1px 6px;
+  font-size:.87em;white-space:normal;overflow-wrap:anywhere;
+}
+.wrap{width:min(1180px,calc(100% - 48px));margin-inline:auto}
+.topbar{
+  position:sticky;top:0;z-index:60;
+  background:rgba(246,242,234,.86);border-bottom:1px solid var(--line);
+  backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+}
+.topbar-inner{display:flex;align-items:center;gap:22px;height:64px}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;flex:none}
+.brand-mark{
+  width:30px;height:30px;border-radius:9px;background:var(--ink);color:var(--paper);
+  display:grid;place-items:center;font-family:var(--mono);font-size:12px;font-weight:700;
+}
+.brand-text{font-size:13.5px;font-weight:650;letter-spacing:-.01em}
+.brand-text em{color:var(--rtl);font-style:normal;margin:0 3px}
+.topnav{display:flex;gap:2px;margin-left:auto;overflow:auto;scrollbar-width:none}
+.topnav::-webkit-scrollbar{display:none}
+.topnav a{
+  padding:6px 10px;border-radius:999px;text-decoration:none;white-space:nowrap;
+  color:var(--muted);font-size:13px;transition:background .18s,color .18s;
+}
+.topnav a:hover,.topnav a.active{background:var(--paper-2);color:var(--ink)}
+.top-badge{
+  flex:none;font-family:var(--mono);font-size:11px;letter-spacing:.03em;
+  border:1px solid var(--line);background:var(--card);border-radius:999px;
+  padding:5px 10px;color:var(--muted);
+}
+@media(max-width:920px){.topnav{display:none}.top-badge{margin-left:auto}}
+
+.hero{
+  display:grid;grid-template-columns:minmax(0,1.32fr) minmax(300px,.68fr);
+  gap:60px;align-items:end;padding:88px 0 62px;
+}
+.eyebrow{
+  margin:0;font-family:var(--mono);text-transform:uppercase;
+  font-size:11.5px;letter-spacing:.15em;color:var(--rtl);
+}
+.hero h1{
+  margin:18px 0 24px;font-size:clamp(44px,6.3vw,84px);
+  line-height:1.02;letter-spacing:-.045em;font-weight:750;
+}
+.hero h1 span{color:var(--rtl)}
+.lede{margin:0;max-width:64ch;color:var(--muted);font-size:18px;line-height:1.82}
+.lede strong{color:var(--ink);font-weight:650}
+.hero-tags{display:flex;flex-wrap:wrap;gap:8px;margin-top:28px}
+.tag{
+  border:1px solid var(--line);background:rgba(255,253,248,.65);
+  border-radius:999px;padding:5px 11px;font-size:12.5px;color:#494b50;
+}
+.tag::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--amber);margin-right:7px;vertical-align:1px}
+.hero-card{
+  background:var(--ink);color:#f3efe6;border-radius:22px;padding:28px;
+  box-shadow:var(--shadow);position:relative;overflow:hidden;
+}
+.hero-card::after{
+  content:"";position:absolute;width:220px;height:220px;right:-100px;top:-100px;
+  border-radius:50%;background:radial-gradient(circle,rgba(217,154,43,.34),transparent 68%);
+}
+.hero-card-kicker{
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.18em;
+  color:#d7ad6a;margin-bottom:14px;
+}
+.hero-card p{margin:0;font-size:14.5px;line-height:1.8;color:#d8d3c8}
+.hero-card strong{color:#fff}
+.hero-card code{background:rgba(255,255,255,.10);color:#ffd8ae;white-space:normal}
+.mini-switch{margin:20px 0 16px;border-top:1px solid rgba(255,255,255,.14);border-bottom:1px solid rgba(255,255,255,.14)}
+.mini-row{display:grid;grid-template-columns:112px 1fr;gap:12px;padding:11px 0;font-family:var(--mono);font-size:11.5px;line-height:1.55;color:#bdb8ad}
+.mini-row+.mini-row{border-top:1px dashed rgba(255,255,255,.10)}
+.mini-row.active .mini-key{color:#ffbd80}
+.mini-key{color:#8f8b83}
+.hero-note{font-size:12.5px!important;color:#a9a49a!important}
+@media(max-width:980px){
+  .hero{grid-template-columns:1fr;gap:36px;padding-top:64px}
+  .hero-card{max-width:640px}
+}
+
+.section{padding:76px 0;border-top:1px solid var(--line)}
+.section-head{display:grid;grid-template-columns:104px minmax(0,1fr);gap:22px;margin-bottom:34px}
+.section-index{font-family:var(--mono);font-size:11px;letter-spacing:.12em;color:var(--rtl);padding-top:9px}
+.section-head h2{margin:0 0 10px;font-size:clamp(28px,3.5vw,44px);line-height:1.14;letter-spacing:-.03em}
+.section-intro{margin:0;color:var(--muted);font-size:16.5px;max-width:78ch}
+.section-intro strong{color:var(--ink)}
+h3{margin:0 0 10px;font-size:21px;line-height:1.3;letter-spacing:-.015em}
+h4{margin:0 0 8px;font-size:16px;line-height:1.4}
+p{margin:0 0 16px}
+.muted{color:var(--muted)}
+.small{font-size:13px;line-height:1.7}
+@media(max-width:760px){
+  .wrap{width:calc(100% - 32px)}
+  .section{padding:56px 0}
+  .section-head{grid-template-columns:1fr;gap:6px}
+  .section-index{padding-top:0}
+}
+
+.grid-3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}
+.grid-2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.grid-2>*,.grid-3>*,.make-grid>*,.code-pair>*,.archive-compare>*,
+.choose>*,.error-cards>*,.diff-col>*{min-width:0}
+@media(max-width:920px){.grid-3,.grid-2{grid-template-columns:1fr}}
+.card{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:22px 24px;min-width:0;
+}
+.card-num{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;color:var(--rtl);margin-bottom:10px}
+.card h3{font-size:18px}
+.card p:last-child{margin-bottom:0}
+.card p{font-size:14.5px;color:var(--muted)}
+.card strong{color:var(--ink)}
+
+.callout{
+  border-left:3px solid var(--rtl);background:var(--rtl-bg);
+  border-radius:0 14px 14px 0;padding:17px 20px;margin:20px 0;
+  font-size:14.5px;line-height:1.75;
+}
+.callout.green{border-color:var(--green);background:var(--green-bg)}
+.callout.blue{border-color:var(--soft);background:var(--soft-bg)}
+.callout p:last-child{margin-bottom:0}
+.callout strong{font-weight:680}
+
+/* ---------- switchboard ---------- */
+.switchboard{
+  background:linear-gradient(180deg,#f0eade,#eae3d5);
+  border:1px solid var(--line);border-radius:24px;padding:26px;
+  box-shadow:0 18px 50px rgba(58,45,25,.07);
+}
+.sb-toolbar{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:22px}
+.sb-toolbar-label{font-family:var(--mono);font-size:11px;letter-spacing:.12em;color:var(--muted)}
+.seg{display:inline-flex;background:#ded6c8;border-radius:999px;padding:4px;gap:2px}
+.seg-btn{
+  border:0;background:transparent;border-radius:999px;cursor:pointer;
+  font-family:var(--mono);font-size:12px;padding:8px 14px;color:#62635f;
+  transition:background .18s,color .18s,box-shadow .18s;
+}
+.seg-btn:hover{color:var(--ink)}
+.seg-btn[aria-pressed="true"]{background:var(--ink);color:#fff;box-shadow:0 4px 14px rgba(0,0,0,.18)}
+.sb-live{
+  margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--muted);
+  display:flex;align-items:center;gap:7px;
+}
+.sb-live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 0 4px rgba(217,154,43,.16)}
+.sb-top{display:grid;gap:0;justify-items:center;text-align:center}
+.node{
+  width:min(560px,100%);background:var(--card);border:1px solid var(--line);
+  border-radius:13px;padding:12px 16px;text-align:left;
+  box-shadow:0 2px 0 rgba(0,0,0,.02);
+}
+.node-label{display:block;font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;color:var(--rtl);margin-bottom:3px;text-transform:uppercase}
+.node strong{display:block;font-family:var(--mono);font-size:13px;font-weight:600;line-height:1.55}
+.node small{display:block;color:var(--muted);font-size:12px;line-height:1.55;margin-top:2px}
+.abi-node{border:1px solid #bfa06a;background:#fff8e9}
+.sb-link{width:1px;height:24px;background:var(--line)}
+.sb-switch-row{
+  display:flex;align-items:center;gap:14px;margin:20px 0;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--muted);
+}
+.sb-switch-row::before,.sb-switch-row::after{content:"";height:1px;background:var(--line);flex:1}
+.sb-branch{display:grid;grid-template-columns:1fr 1fr;gap:18px;align-items:stretch}
+.path-card{
+  background:rgba(255,253,248,.78);border:1px solid var(--line);border-radius:16px;
+  padding:18px;transition:opacity .25s,filter .25s,border-color .25s,transform .25s;
+}
+.path-card .path-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:14px}
+.path-kicker{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--muted)}
+.path-state{
+  font-family:var(--mono);font-size:10px;border-radius:999px;padding:3px 8px;
+  background:#e4dece;color:#66675f;
+}
+.stack{display:grid;gap:7px}
+.stack .node{width:100%;padding:10px 12px}
+.stack .node strong{font-size:12.5px}
+.stack .node small{font-size:11.5px}
+.arrow-down{text-align:center;color:#999487;font-size:12px;line-height:1}
+.path-foot{
+  margin-top:14px;padding-top:12px;border-top:1px dashed var(--line);
+  font-size:12.5px;color:var(--muted);line-height:1.65;
+}
+.path-foot code{white-space:normal}
+.switchboard[data-backend="soft"] [data-path="verilator"],
+.switchboard[data-backend="verilator"] [data-path="soft"]{
+  opacity:.34;filter:grayscale(.8);transform:scale(.995);
+}
+.switchboard[data-backend="soft"] [data-path="soft"]{border-color:rgba(36,87,214,.45)}
+.switchboard[data-backend="verilator"] [data-path="verilator"]{border-color:rgba(182,74,18,.5)}
+.switchboard[data-backend="soft"] [data-path="soft"] .path-state{background:var(--soft-bg);color:var(--soft)}
+.switchboard[data-backend="verilator"] [data-path="verilator"] .path-state{background:var(--rtl-bg);color:var(--rtl)}
+.rtl-node{border-color:#d7a57e;background:#fff6ee}
+.sb-note{
+  margin:18px 0 0;text-align:center;font-size:12.5px;color:var(--muted);
+}
+.sb-note code{white-space:normal}
+@media(max-width:820px){
+  .sb-branch{grid-template-columns:1fr}
+  .switchboard{padding:18px}
+  .sb-live{display:none}
+}
+
+/* ---------- code ---------- */
+.codeblock{
+  background:var(--code);border-radius:14px;overflow:hidden;
+  box-shadow:0 14px 40px rgba(20,18,14,.16);margin:16px 0;min-width:0;
+}
+.code-bar{
+  display:flex;align-items:center;gap:9px;padding:9px 14px;
+  background:var(--code-bar);border-bottom:1px solid #32343a;
+  font-family:var(--mono);font-size:10.5px;color:#a7a39a;
+}
+.code-bar .lights{display:flex;gap:5px;margin-right:4px}
+.code-bar .lights i{width:7px;height:7px;border-radius:50%;background:#4a4b50;display:block}
+.code-bar .lights i:first-child{background:#b06a4b}
+.code-bar .lights i:nth-child(2){background:#aa8a49}
+.code-bar .lights i:nth-child(3){background:#4d8062}
+.code-bar .path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.code-bar .lang{margin-left:auto;color:#747169;letter-spacing:.08em;flex:none}
+.codeblock pre{
+  margin:0;padding:16px 18px;overflow:auto;
+  color:var(--code-ink);font-size:12.3px;line-height:1.72;tab-size:4;
+}
+.codeblock pre::-webkit-scrollbar{height:9px}
+.codeblock pre::-webkit-scrollbar-thumb{background:#3b3d43;border-radius:99px}
+.c-com{color:#7f858f;font-style:italic}
+.c-kw{color:#c792ea}
+.c-type{color:#82aaff}
+.c-fn{color:#ffcb6b}
+.c-str{color:#c3e88d}
+.c-num{color:#f78c6c}
+.c-dim{color:#8e8a80}
+.hl-line{display:block;background:rgba(255,203,107,.075);margin:0 -18px;padding:0 18px}
+.code-caption{font-size:12px;color:var(--muted);margin:-6px 0 18px;line-height:1.65}
+.code-caption code{font-size:11.5px}
+.path-ref{
+  font-family:var(--mono);font-size:10.5px;color:var(--muted);
+  border:1px solid var(--line);border-radius:999px;padding:2px 8px;
+  display:inline-block;margin:2px 4px 2px 0;white-space:nowrap;
+}
+
+/* ---------- makefile / table ---------- */
+.make-grid{display:grid;grid-template-columns:minmax(0,1.08fr) minmax(0,.92fr);gap:22px;align-items:start}
+@media(max-width:960px){.make-grid{grid-template-columns:1fr}}
+.steps{display:grid;gap:13px;margin:0;padding:0;list-style:none;counter-reset:step}
+.steps li{display:grid;grid-template-columns:34px minmax(0,1fr);gap:13px;align-items:start}
+.step-num{
+  width:30px;height:30px;border-radius:50%;background:var(--ink);color:#fff;
+  display:grid;place-items:center;font-family:var(--mono);font-size:11px;
+  margin-top:2px;
+}
+.steps h4{margin:0 0 3px;font-size:14.5px}
+.steps p{margin:0;font-size:13px;line-height:1.7;color:var(--muted)}
+.steps code{white-space:normal}
+
+.table-wrap{
+  overflow-x:auto;border:1px solid var(--line);border-radius:15px;
+  background:var(--card);margin:18px 0;
+}
+table{width:100%;border-collapse:collapse;min-width:720px}
+th,td{padding:13px 15px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line);font-size:13.5px;line-height:1.65}
+th{
+  background:#efe9dd;color:var(--muted);font-family:var(--mono);
+  font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;
+}
+tr:last-child td{border-bottom:0}
+td code{font-size:11.8px;white-space:normal}
+td .yes{color:var(--green);font-weight:650}
+td .no{color:#9a4a22;font-weight:650}
+
+.archive-compare{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:18px}
+@media(max-width:820px){.archive-compare{grid-template-columns:1fr}}
+.archive{
+  border:1px solid var(--line);border-radius:15px;background:var(--card);padding:17px;
+}
+.archive h4{font-family:var(--mono);font-size:12px;margin-bottom:11px}
+.archive h4 span{font-family:var(--sans);color:var(--muted);font-weight:400}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{
+  font-family:var(--mono);font-size:10.5px;padding:4px 8px;border-radius:6px;
+  background:#eee8dc;color:#54554f;border:1px solid #e0d8c9;
+}
+.chip.hot{background:var(--rtl-bg);color:var(--rtl);border-color:#efcdb6}
+.chip.cool{background:var(--soft-bg);color:var(--soft);border-color:#cfdaf7}
+.chip.gen{background:var(--green-bg);color:var(--green);border-color:#c3e2d9}
+
+/* ---------- device / execute ---------- */
+.code-pair{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+@media(max-width:860px){.code-pair{grid-template-columns:1fr}}
+.pair-label{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11px;color:var(--muted);margin-bottom:7px}
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+.dot.soft{background:var(--soft)}
+.dot.rtl{background:var(--rtl)}
+.dot.green{background:var(--green)}
+.check-strip{
+  display:flex;flex-wrap:wrap;gap:7px;margin:14px 0 22px;
+}
+.check-strip span{
+  font-size:12px;border:1px solid var(--line);background:var(--card);
+  border-radius:999px;padding:5px 10px;color:#53544f;
+}
+.check-strip span::before{content:"✓";color:var(--green);margin-right:6px;font-weight:700}
+.flow-card{
+  border:1px solid var(--line);border-radius:16px;background:var(--card);
+  padding:18px;min-width:0;
+}
+.flow-card.soft-flow{border-top:3px solid var(--soft)}
+.flow-card.rtl-flow{border-top:3px solid var(--rtl)}
+.flow-title{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.flow-title .badge{
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.08em;padding:3px 7px;
+  border-radius:999px;background:#eee8dc;color:var(--muted);
+}
+.flow-card p{font-size:13.5px;color:var(--muted)}
+.flow-card p:last-child{margin-bottom:0}
+.flow-line{
+  display:grid;gap:6px;margin:12px 0;
+}
+.flow-line .ln{
+  border:1px solid var(--line);background:#f5f0e6;border-radius:8px;
+  padding:7px 10px;font-family:var(--mono);font-size:11.5px;line-height:1.55;
+}
+.flow-line .ar{text-align:center;color:#a49e91;font-size:11px;line-height:1}
+.formula-band{
+  background:var(--ink);color:#f1ede4;border-radius:16px;padding:20px 22px;
+  display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center;
+  margin:22px 0;
+}
+.formula-band .f{
+  font-family:var(--mono);font-size:13px;line-height:1.8;text-align:center;
+}
+.formula-band .f em{font-style:normal;color:#ffcb6b}
+.formula-band .where{
+  font-family:var(--mono);font-size:10px;letter-spacing:.1em;color:#9c978d;
+  display:block;margin-top:6px;
+}
+.formula-band .split-arrow{font-family:var(--mono);font-size:10px;color:#d7ad6a;text-align:center;line-height:1.5}
+@media(max-width:760px){
+  .formula-band{grid-template-columns:1fr;gap:8px}
+  .formula-band .split-arrow{
+    transform:none;padding:6px 0;
+    border-top:1px dashed rgba(255,255,255,.16);
+    border-bottom:1px dashed rgba(255,255,255,.16);
+    font-size:10px;
+  }
+}
+
+/* ---------- journey ---------- */
+.journey{
+  display:grid;grid-template-columns:280px minmax(0,1fr);
+  border:1px solid var(--line);border-radius:20px;overflow:hidden;
+  background:var(--card);box-shadow:0 16px 44px rgba(58,45,25,.06);
+}
+.journey-nav{
+  background:#f1ebe0;border-right:1px solid var(--line);
+  padding:12px;display:flex;flex-direction:column;gap:3px;
+}
+.jstep{
+  display:flex;align-items:center;gap:10px;width:100%;
+  border:0;background:transparent;color:#696a65;border-radius:9px;
+  padding:9px 10px;cursor:pointer;text-align:left;font-family:var(--sans);
+  font-size:13px;line-height:1.4;transition:background .18s,color .18s;
+}
+.jstep:hover{background:#e7dfd1;color:var(--ink)}
+.jstep .n{
+  flex:none;width:24px;height:24px;border-radius:50%;display:grid;place-items:center;
+  font-family:var(--mono);font-size:10px;border:1px solid #cfc6b6;color:#77786f;
+}
+.jstep[aria-selected="true"]{background:var(--ink);color:#fff}
+.jstep[aria-selected="true"] .n{background:var(--rtl);border-color:var(--rtl);color:#fff}
+.journey-body{padding:24px 28px 20px;min-width:0}
+.jpanel{display:none}
+.jpanel.active{display:block;animation:panelIn .24s ease both}
+@keyframes panelIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
+.jpanel-top{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin-bottom:10px}
+.jpanel h3{margin:0;font-size:23px}
+.jpanel .stage-tag{
+  flex:none;font-family:var(--mono);font-size:10px;letter-spacing:.07em;
+  color:var(--rtl);border:1px solid #e6c2a9;background:var(--rtl-bg);
+  border-radius:999px;padding:4px 8px;
+}
+.jpanel p{font-size:14px;color:var(--muted);line-height:1.78}
+.jpanel ul{margin:10px 0 14px;padding-left:19px;color:var(--muted);font-size:14px;line-height:1.75}
+.jpanel li{margin:4px 0}
+.jpanel li strong{color:var(--ink)}
+.jpanel .codeblock{margin:12px 0 10px}
+.jpanel .codeblock pre{font-size:11.7px}
+.journey-foot{
+  display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;
+  border-top:1px solid var(--line);
+}
+.journey-foot .ref{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-right:auto}
+.jbtn{
+  border:1px solid var(--line);background:var(--card);color:var(--ink);
+  border-radius:8px;padding:6px 12px;font-family:var(--mono);font-size:11px;
+  cursor:pointer;transition:background .15s;
+}
+.jbtn:hover:not(:disabled){background:#eee7d9}
+.jbtn:disabled{opacity:.35;cursor:not-allowed}
+.js-count{font-family:var(--mono);font-size:10.5px;color:var(--muted);min-width:54px;text-align:center}
+@media(max-width:860px){
+  .journey{grid-template-columns:1fr}
+  .journey-nav{
+    flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);
+    padding:9px;
+  }
+  .jstep{width:auto;flex:none;white-space:nowrap}
+  .jstep .n{width:21px;height:21px}
+  .journey-body{padding:20px 18px 16px}
+  .jpanel h3{font-size:20px}
+}
+
+.subhead{display:flex;align-items:baseline;gap:12px;margin:38px 0 12px}
+.subhead .sn{font-family:var(--mono);font-size:10.5px;color:var(--rtl);letter-spacing:.08em}
+.subhead h3{margin:0}
+
+.beat-grid{display:grid;grid-template-columns:repeat(8,minmax(0,1fr));gap:6px;margin:14px 0 8px}
+.word{
+  background:var(--code);color:var(--code-ink);border-radius:8px;
+  padding:9px 4px 8px;text-align:center;font-family:var(--mono);font-size:9.5px;
+  line-height:1.45;overflow:hidden;
+}
+.word b{display:block;color:#ffcb6b;font-size:10px;font-weight:600}
+.word span{display:block;color:#a9a49a;font-size:8.5px;margin-top:2px}
+.beat-caption{font-size:12px;color:var(--muted);line-height:1.7}
+.weight-strip{
+  margin-top:10px;border:1px solid #4b4d53;border-radius:9px;
+  background:#26272b;padding:8px 10px;font-family:var(--mono);font-size:10.5px;
+  color:#d8d3c8;display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+}
+.weight-strip b{color:#ffcb6b;font-weight:600}
+.weight-strip .bits{
+  flex:1;min-width:160px;height:18px;border-radius:4px;
+  background:repeating-linear-gradient(90deg,#b64a12 0 7px,#3a3b40 7px 9px);
+  opacity:.9;
+}
+.stream{display:flex;flex-direction:column;gap:7px;margin:14px 0}
+.stream-row{display:grid;grid-template-columns:92px minmax(0,1fr);gap:10px;align-items:center}
+.stream-label{font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+.blocks{display:flex;gap:5px;flex-wrap:wrap}
+.block{
+  font-family:var(--mono);font-size:9.5px;color:#6b5b42;background:#f0e5d2;
+  border:1px solid #e0d1b8;border-radius:5px;padding:3px 7px;
+}
+.block.replay{background:var(--rtl-bg);border-color:#eccab1;color:var(--rtl)}
+.stream-note{font-size:12px;color:var(--muted);margin-top:4px}
+
+.handshake-table td:first-child{font-family:var(--mono);font-size:11.5px;white-space:nowrap}
+.handshake-table th:first-child{width:150px}
+
+.error-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:16px 0}
+@media(max-width:820px){.error-cards{grid-template-columns:1fr}}
+.error-card{
+  border:1px solid var(--line);border-radius:13px;background:var(--card);padding:16px 18px;
+}
+.error-card h4{display:flex;align-items:center;gap:8px;font-size:14px;margin-bottom:5px}
+.error-card p{font-size:13px;color:var(--muted);margin:0}
+.error-card .k{
+  font-family:var(--mono);font-size:9.5px;color:var(--rtl);
+  background:var(--rtl-bg);border:1px solid #eccab1;border-radius:999px;padding:2px 7px;
+}
+
+/* ---------- verify / tradeoff ---------- */
+.diff-diagram{
+  display:grid;grid-template-columns:minmax(0,1fr) 52px minmax(0,1fr);
+  gap:12px;align-items:stretch;margin:18px 0;
+}
+.diff-col{display:grid;gap:8px;align-content:start}
+.diff-node{
+  border:1px solid var(--line);border-radius:10px;background:var(--card);
+  padding:10px 12px;font-size:12.5px;line-height:1.55;text-align:center;
+}
+.diff-node code{font-size:11px;white-space:normal}
+.diff-node.head{background:var(--ink);color:#f2eee5;border-color:var(--ink);font-family:var(--mono);font-size:11px}
+.diff-arrow{align-self:center;text-align:center;font-family:var(--mono);font-size:22px;color:#9b9588}
+.diff-result{
+  grid-column:1/-1;border:1px dashed #bfa06a;background:#fff8e9;
+  border-radius:11px;padding:12px 14px;text-align:center;font-size:13px;
+}
+.diff-result strong{color:var(--rtl)}
+@media(max-width:820px){
+  .diff-diagram{grid-template-columns:1fr}
+  .diff-arrow{transform:rotate(90deg)}
+}
+.coverage{display:flex;flex-wrap:wrap;gap:7px;margin:16px 0}
+.coverage span{
+  font-size:12px;background:var(--card);border:1px solid var(--line);
+  border-radius:999px;padding:5px 10px;color:#53544f;
+}
+.coverage span::before{content:"›";color:var(--rtl);margin-right:6px;font-weight:700}
+.choose{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin:18px 0}
+@media(max-width:820px){.choose{grid-template-columns:1fr}}
+.choose-card{border:1px solid var(--line);border-radius:16px;padding:20px;background:var(--card)}
+.choose-card.soft{border-top:3px solid var(--soft)}
+.choose-card.rtl{border-top:3px solid var(--rtl)}
+.choose-card h3{font-size:17px}
+.choose-card ul{margin:8px 0 0;padding-left:18px;color:var(--muted);font-size:13.5px;line-height:1.75}
+.choose-card li{margin:4px 0}
+.limits{display:grid;gap:9px;margin:16px 0}
+.limit{display:grid;grid-template-columns:22px minmax(0,1fr);gap:9px;font-size:13.5px;color:var(--muted);line-height:1.7}
+.limit .x{color:var(--rtl);font-family:var(--mono);font-size:12px;padding-top:1px}
+.limit strong{color:var(--ink)}
+.next-card{
+  border:1px solid var(--line);border-radius:18px;padding:24px;
+  background:linear-gradient(135deg,#fff8e9,#f6efe2);margin-top:20px;
+}
+.next-card .eyebrow{margin-bottom:8px}
+.next-card h3{margin-bottom:6px}
+.next-card p{color:var(--muted);font-size:14px;margin:0;max-width:80ch}
+
+.glossary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-top:18px}
+@media(max-width:960px){.glossary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){.glossary{grid-template-columns:1fr}}
+.gloss{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 15px}
+.gloss dt{font-family:var(--mono);font-size:11px;color:var(--rtl);margin-bottom:4px}
+.gloss dd{margin:0;font-size:12.5px;color:var(--muted);line-height:1.65}
+
+.footer{border-top:1px solid var(--line);padding:36px 0 52px;color:var(--muted);font-size:13px}
+.footer-inner{display:flex;gap:28px;justify-content:space-between;align-items:flex-start;flex-wrap:wrap}
+.footer h4{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--ink);margin:0 0 8px}
+.footer ul{margin:0;padding:0;list-style:none;display:grid;gap:4px}
+.footer li{font-family:var(--mono);font-size:11px;line-height:1.6}
+.footer p{margin:0;max-width:52ch;line-height:1.7}
+.footer .stamp{font-family:var(--mono);font-size:10.5px;letter-spacing:.05em}
+@media print{
+  .topbar,.journey-nav,.seg,.journey-foot{display:none!important}
+  body{background:#fff}
+  .codeblock{box-shadow:none}
+  .section{break-inside:avoid}
+}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap topbar-inner">
+    <a class="brand" href="#top" aria-label="回到顶部">
+      <span class="brand-mark">B</span>
+      <span class="brand-text">BNN <em>/</em> HW notes</span>
+    </a>
+    <nav class="topnav" aria-label="页面目录">
+      <a href="#overview">结论</a>
+      <a href="#contract">契约</a>
+      <a href="#build">构建</a>
+      <a href="#device">设备</a>
+      <a href="#execute">执行</a>
+      <a href="#bridge">桥接</a>
+      <a href="#verify">验证</a>
+      <a href="#tradeoffs">取舍</a>
+    </nav>
+    <span class="top-badge">build-time switch</span>
+  </div>
+</header>
+
+<main>
+<section class="wrap hero" id="top">
+  <div>
+    <p class="eyebrow">BNN-train-infer · 硬件后端笔记 / 01</p>
+    <h1>同一条 API，<br><span>换一颗心脏。</span></h1>
+    <p class="lede">项目最近加入了 <code>bnn-hw</code> 的 SystemVerilog 计算核心，以及一条 Verilator 软硬件协同仿真链路。这一篇只回答一个问题：<strong>bnn-accelerator 这一层，是怎么从 C 软件实现切到仿真器实现的？</strong></p>
+    <div class="hero-tags">
+      <span class="tag">构建期选择</span>
+      <span class="tag">C ABI 不变</span>
+      <span class="tag">整数点积交给 RTL</span>
+      <span class="tag">FP32 后处理留在 C</span>
+    </div>
+  </div>
+  <aside class="hero-card">
+    <div class="hero-card-kicker">ONE-LINE ANSWER</div>
+    <p>没有运行时 dispatch。切到 Verilator 后，链接进静态库的 <code>BNN_*</code> 符号换成了另一份实现；设备句柄里多挂一个仿真器，<code>BNN_Execute</code> 把整数点积交给桥接层，桥接层再逐周期驱动 RTL。</p>
+    <div class="mini-switch" aria-hidden="true">
+      <div class="mini-row active"><span class="mini-key">ACCE=soft</span><span>soft-bnn-accelerator.c</span></div>
+      <div class="mini-row"><span class="mini-key">ACCE=verilator</span><span>verilator-bnn-accelerator.c<br>+ bridge.cpp + Vbnn_core_top</span></div>
+    </div>
+    <p class="hero-note">两层之上：<code>bnn-infer</code>、BNNE 引擎和模型代码完全无感。</p>
+  </aside>
+</section>
+
+<section class="wrap section" id="overview">
+  <div class="section-head">
+    <div class="section-index">01 / 08</div>
+    <div>
+      <h2>先给结论：切换发生在 <code>make</code>，不在运行期</h2>
+      <p class="section-intro">整个仓库里，应用、引擎和模型只认识 <code>bnn-accelerator.h</code> 这一层 C 接口。所谓“切到仿真器”，不是给程序加一个 <code>--backend</code> 开关，而是在构建时把实现这一层接口的<strong>那个翻译单元</strong>换掉，再额外链接桥接层与 Verilator 生成的模型。</p>
+    </div>
+  </div>
+
+  <div class="grid-3">
+    <article class="card">
+      <div class="card-num">POINT 01</div>
+      <h3>构建期二选一</h3>
+      <p><code>ACCE=soft</code> 编译 <code>soft-bnn-accelerator.c</code>；<code>ACCE=verilator</code> 编译 <code>verilator-bnn-accelerator.c</code>，并加入桥接层、Verilator 运行库和 RTL 模型。两个后端不会同时进入同一个可执行文件。</p>
+    </article>
+    <article class="card">
+      <div class="card-num">POINT 02</div>
+      <h3>句柄内部换零件</h3>
+      <p>公共类型仍是 <code>BNN_Device</code> 这种不透明指针。仿真后端的 <code>struct bnn_accel_device</code> 只是多了一个 <code>BNN_RtlSim* sim</code>，调用者看不到，ABI 也不变。</p>
+    </article>
+    <article class="card">
+      <div class="card-num">POINT 03</div>
+      <h3>算术分工，语义不换</h3>
+      <p>RTL 只算整数分组点积 <code>D[n][g]</code>；GEMV/GEMM 的 FP16 scale 转换与按组 FP32 累加仍在 C 中完成。这样两后端的输出可以逐字节一致。</p>
+    </article>
+  </div>
+
+  <div class="switchboard" id="switchboard" data-backend="soft" style="margin-top:26px">
+    <div class="sb-toolbar">
+      <span class="sb-toolbar-label">make 时选择</span>
+      <div class="seg" role="group" aria-label="切换构建后端">
+        <button class="seg-btn" type="button" data-backend="soft" aria-pressed="true">ACCE=soft</button>
+        <button class="seg-btn" type="button" data-backend="verilator" aria-pressed="false">ACCE=verilator</button>
+      </div>
+      <span class="sb-live">同一条 <code>BNN_*</code> ABI</span>
+    </div>
+
+    <div class="sb-top">
+      <div class="node app-node">
+        <span class="node-label">上层 · 完全无感</span>
+        <strong>bnn-infer · BNNE engine · model-mlp / cnn / gpt / llama</strong>
+        <small>只 include <code>bnn-accelerator.h</code>，只调用 <code>BNN_*</code> 函数</small>
+      </div>
+      <div class="sb-link" aria-hidden="true"></div>
+      <div class="node abi-node">
+        <span class="node-label">稳定边界</span>
+        <strong>bnn-accelerator.h</strong>
+        <small>11 个 C 符号 · 不透明句柄 · 相同的尺寸/数值契约</small>
+      </div>
+    </div>
+
+    <div class="sb-switch-row">链接期二选一</div>
+
+    <div class="sb-branch">
+      <article class="path-card" data-path="soft">
+        <div class="path-head">
+          <span class="path-kicker">PATH A · 纯 C</span>
+          <span class="path-state">当前默认</span>
+        </div>
+        <div class="stack">
+          <div class="node">
+            <span class="node-label">加速器实现</span>
+            <strong>soft-bnn-accelerator.c</strong>
+            <small>公共 API 校验 + 整数点积 + FP16→FP32 后处理，全在 CPU</small>
+          </div>
+          <div class="arrow-down">↓</div>
+          <div class="node">
+            <span class="node-label">运行时</span>
+            <strong>malloc / memcpy</strong>
+            <small>矩阵和缓冲区就是主机内存；没有额外工具链</small>
+          </div>
+        </div>
+        <div class="path-foot">产物：<code>build/soft/libbnn-engine.a</code><br>链接：<code>CC</code> + <code>-lm</code></div>
+      </article>
+
+      <article class="path-card" data-path="verilator">
+        <div class="path-head">
+          <span class="path-kicker">PATH B · 软硬件协同仿真</span>
+          <span class="path-state">功能验证</span>
+        </div>
+        <div class="stack">
+          <div class="node rtl-node">
+            <span class="node-label">加速器实现</span>
+            <strong>verilator-bnn-accelerator.c</strong>
+            <small>公共 API、句柄、范围检查；整数点积转交桥接层</small>
+          </div>
+          <div class="arrow-down">↓</div>
+          <div class="node rtl-node">
+            <span class="node-label">C ABI 桥接</span>
+            <strong>verilator-bnn-bridge.cpp</strong>
+            <small>逐周期驱动握手、打包激活/权重、收集结果、超时恢复</small>
+          </div>
+          <div class="arrow-down">↓</div>
+          <div class="node rtl-node">
+            <span class="node-label">生成的 C++ 仿真模型</span>
+            <strong>Vbnn_core_top</strong>
+            <small>由 <code>bnn-hw/bnn_core/*.sv</code> 经 Verilator 生成；单任务、32 lane 整数点积</small>
+          </div>
+        </div>
+        <div class="path-foot">产物：<code>build/verilator/libbnn-engine.a</code><br>链接：<code>CXX</code> + <code>-lm -pthread -latomic</code></div>
+      </article>
+    </div>
+    <p class="sb-note">同一个二进制里不会出现两条路径。上面的切换只用于对照阅读；真正决定产物的是 <code>make ACCE=...</code>。</p>
+  </div>
+
+  <div class="callout">
+    <p><strong>最关键的一句话：</strong>引擎从未“发现”后端变了。它仍然按 <code>DeviceOpen → GetCaps → BufferAlloc → BufferWrite → Execute → BufferRead</code> 的顺序调用；变化的只是这些符号背后最终执行的是 C 代码，还是一条 Verilator 仿真链路。</p>
+  </div>
+</section>
+
+<section class="wrap section" id="contract">
+  <div class="section-head">
+    <div class="section-index">02 / 08</div>
+    <div>
+      <h2>先看不变的部分：一条很薄的 C ABI</h2>
+      <p class="section-intro">能换得这么干净，是因为分界线划得很窄。上层不拥有“设备”的内部结构，只持有一个不透明句柄；所有生命周期、内存和计算都通过固定签名的函数进入加速器层。</p>
+    </div>
+  </div>
+
+  <div class="grid-2" style="align-items:start">
+    <div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">bnn-accelerator/bnn-accelerator.h</span><span class="lang">C</span></div>
+<pre><code><span class="c-com">/* 调用者只看得见指针，看不见结构体内容 */</span>
+typedef struct bnn_accel_device* <span class="c-type">BNN_Device</span>;
+typedef struct bnn_accel_matrix* <span class="c-type">BNN_Matrix</span>;
+typedef struct bnn_accel_buffer* <span class="c-type">BNN_Buffer</span>;
+
+<span class="c-type">BNN_Status</span> <span class="c-fn">BNN_DeviceOpen</span>(uint32_t device_index,
+                          BNN_Device* out_device);
+<span class="c-type">BNN_Status</span> <span class="c-fn">BNN_DeviceGetCaps</span>(BNN_Device device,
+                             BNN_Caps* out_caps);
+<span class="c-type">BNN_Status</span> <span class="c-fn">BNN_MatrixCreate</span>(BNN_Device device,
+                             const BNN_MatrixDesc* desc,
+                             BNN_Matrix* out_matrix);
+<span class="c-type">BNN_Status</span> <span class="c-fn">BNN_BufferWrite</span>(BNN_Buffer buffer, size_t offset,
+                             const void* src, size_t bytes);
+<span class="c-type">BNN_Status</span> <span class="c-fn">BNN_Execute</span>(BNN_Device device, const BNN_Job* job);
+<span class="c-type">BNN_Status</span> <span class="c-fn">BNN_BufferRead</span>(BNN_Buffer buffer, size_t offset,
+                            void* dst, size_t bytes);</code></pre>
+      </div>
+      <p class="code-caption">节选。完整 API 还包括 <code>MatrixDestroy</code>、<code>BufferAlloc/Free</code>、<code>DeviceClose</code>、<code>StatusString</code>，两个后端都必须提供同名同签名的实现。</p>
+    </div>
+
+    <div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">bnn-sw/runtime.c · 引擎侧调用链</span><span class="lang">C</span></div>
+<pre><code>BNN_DeviceOpen(options.device_index, &amp;engine-&gt;device)
+BNN_DeviceGetCaps(engine-&gt;device, caps)
+BNN_BufferAlloc(engine-&gt;device, input_bytes,  &amp;engine-&gt;input)
+BNN_BufferAlloc(engine-&gt;device, output_bytes, &amp;engine-&gt;output)
+
+BNN_BufferWrite(engine-&gt;input, 0, input, input_bytes)
+BNN_Execute(engine-&gt;device, &amp;job)
+BNN_BufferRead(engine-&gt;output, 0, output, output_bytes)
+
+BNN_BufferFree(engine-&gt;input)
+BNN_BufferFree(engine-&gt;output)
+BNN_DeviceClose(engine-&gt;device)</code></pre>
+      </div>
+      <p class="code-caption">这段代码在两种构建下完全相同。模型层只关心 <code>GEMV/GEMM</code> 的语义，不关心设备是谁。</p>
+    </div>
+  </div>
+
+  <div class="callout green">
+    <p><strong>数值契约也必须相同。</strong>公共头文件规定：FP16 scale 精确转成 FP32；每组乘积单独舍入；按组索引递增做 FP32 累加；禁用 FMA 与 fast-math；舍入模式必须是 <code>FE_TONEAREST</code>，并保留次正规数。两个后端各自保留了同名、同实现的 <code>HalfToFloat</code>、<code>FloatMultiply</code>、<code>FloatAdd</code>，这是后面逐字节对比能成立的前提。</p>
+  </div>
+
+  <div class="grid-3" style="margin-top:18px">
+    <article class="card">
+      <div class="card-num">CAPS</div>
+      <h3>能力上报一致</h3>
+      <p>两个后端的 <code>BNN_DeviceGetCaps</code> 都报告 <code>max_in/out_features = 4096</code>、<code>group_size = 128</code>、支持 GEMV/GEMM/DOT_GROUPS。引擎启动时只检查 <code>api_version</code>、<code>group_size</code>、<code>max_rows</code>，因此不会产生分支。</p>
+    </article>
+    <article class="card">
+      <div class="card-num">ABI</div>
+      <h3>同名符号，不同实现</h3>
+      <p>顶层构建只把其中一份 <code>*-bnn-accelerator.o</code> 放进归档。链接器解析 <code>BNN_Execute</code> 等符号时，只可能命中一份。没有函数指针表，也没有运行时注册。</p>
+    </article>
+    <article class="card">
+      <div class="card-num">TEST</div>
+      <h3>同一个测试对象</h3>
+      <p>差分测试把 <code>tests/test_bnn_accelerator.c</code> 只编译一次，然后分别链接软件实现和 Verilator 归档。同一份 C 调用方代码、同一组断言，最后比较两边的输出字节。</p>
+    </article>
+  </div>
+</section>
+
+<section class="wrap section" id="build">
+  <div class="section-head">
+    <div class="section-index">03 / 08</div>
+    <div>
+      <h2>构建期：Makefile 到底换掉了什么</h2>
+      <p class="section-intro">切换点集中在一个 Make 变量 <code>ACCE</code> 上。它同时决定源文件、构建目录、工具链和归档内容；但不会出现在 <code>bnn-infer</code> 的命令行参数里。</p>
+    </div>
+  </div>
+
+  <div class="make-grid">
+    <div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">Makefile · 关键行</span><span class="lang">Make</span></div>
+<pre><code><span class="c-com"># 1. 只允许两种取值</span>
+ACCE ?= soft
+ifeq ($(filter $(ACCE),soft verilator),)
+$(error Unsupported ACCE '$(ACCE)')
+endif
+
+<span class="c-com"># 2. 文件名就是切换契约</span>
+ACCEL_SOURCE := bnn-accelerator/$(ACCE)-bnn-accelerator.c
+
+<span class="c-com"># 3. 两套产物互不污染</span>
+BUILD_DIR := build/$(ACCE)
+LIBRARY   := $(BUILD_DIR)/libbnn-engine.a
+
+<span class="c-com"># 4. Verilator 分支：额外生成模型、桥接、运行库</span>
+ifeq ($(ACCE),verilator)
+LINKER    := $(CXX)
+LINK_FLAGS += $(filter-out -std=c++17,$(CXXFLAGS))
+LDLIBS    += -pthread -latomic
+RTL_SOURCES    := $(wildcard bnn-hw/bnn_core/*.sv)
+RTL_LIBRARY    := $(RTL_DIR)/Vbnn_core_top__ALL.a
+BRIDGE_OBJECT  := $(BUILD_DIR)/bnn-accelerator/verilator-bnn-bridge.o
+RTL_RUNTIME_OBJECTS := $(BUILD_DIR)/verilated.o \
+                       $(BUILD_DIR)/verilated_threads.o \
+                       $(BUILD_DIR)/verilated_vcd_c.o
+endif</code></pre>
+      </div>
+      <p class="code-caption">节选并加了分段注释。原始顺序见 <code>Makefile:1-62</code>。核心是第 26 行：<code>$(ACCE)-bnn-accelerator.c</code> 把“后端选择”变成了“选哪个文件参与编译”。</p>
+    </div>
+
+    <ol class="steps">
+      <li>
+        <span class="step-num">1</span>
+        <div>
+          <h4>选文件名</h4>
+          <p><code>soft</code> → <code>soft-bnn-accelerator.c</code>；<code>verilator</code> → <code>verilator-bnn-accelerator.c</code>。两个文件导出同一组 <code>BNN_*</code> 符号，所以上层源码不需要改。</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-num">2</span>
+        <div>
+          <h4>隔离构建目录</h4>
+          <p>产物分别落在 <code>build/soft/</code> 与 <code>build/verilator/</code>。切换时不会把上一后端的 <code>.o</code> 混进新归档；根目录的 <code>bnn-infer</code> 是 phony 目标，每次都会重新链接。</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-num">3</span>
+        <div>
+          <h4>生成 RTL 模型</h4>
+          <p><code>verilator --cc --assert --trace --top-module bnn_core_top ...</code> 把 <code>bnn-hw/bnn_core/*.sv</code> 转成一个 C++ 类 <code>Vbnn_core_top</code>，再编译成 <code>Vbnn_core_top__ALL.a</code>。</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-num">4</span>
+        <div>
+          <h4>桥接与运行库一起入档</h4>
+          <p>桥接层用 <code>C++17</code> 编译；Verilator 的 <code>verilated.cpp</code>、<code>verilated_threads.cpp</code>、<code>verilated_vcd_c.cpp</code> 也进入归档。最终用 <code>ar -M</code> 把生成的 RTL 归档展开合并进来，嵌入方仍然只需链接一个 <code>.a</code>。</p>
+        </div>
+      </li>
+      <li>
+        <span class="step-num">5</span>
+        <div>
+          <h4>换链接器，改测试驱动</h4>
+          <p>最终链接从 <code>CC</code> 改为 <code>CXX</code>，并附加 <code>-pthread -latomic -lm</code>。测试脚本也改成“C 源单独编译成 <code>.o</code>，再用 C++ 链接器链接归档”，否则 C 测试程序无法拉入 C++ 对象。</p>
+        </div>
+      </li>
+    </ol>
+  </div>
+
+  <div class="archive-compare">
+    <div class="archive">
+      <h4>build/soft/libbnn-engine.a <span>· 约 87 KB</span></h4>
+      <div class="chips">
+        <span class="chip">bnn-engine.o</span>
+        <span class="chip">runtime.o</span>
+        <span class="chip">model-*.o</span>
+        <span class="chip cool">soft-bnn-accelerator.o</span>
+      </div>
+      <p class="small muted" style="margin:10px 0 0">纯 C 对象。嵌入程序用 C 编译器链接即可。</p>
+    </div>
+    <div class="archive">
+      <h4>build/verilator/libbnn-engine.a <span>· 约 737 KB</span></h4>
+      <div class="chips">
+        <span class="chip">bnn-engine.o</span>
+        <span class="chip">runtime.o</span>
+        <span class="chip">model-*.o</span>
+        <span class="chip hot">verilator-bnn-accelerator.o</span>
+        <span class="chip hot">verilator-bnn-bridge.o</span>
+        <span class="chip gen">Vbnn_core_top__ALL.o</span>
+        <span class="chip gen">verilated*.o</span>
+      </div>
+      <p class="small muted" style="margin:10px 0 0">多了桥接、生成的 RTL 模型和 Verilator 运行库；仍然打成一个静态归档。</p>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>维度</th><th>ACCE=soft</th><th>ACCE=verilator</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>加速器实现</td><td><code>soft-bnn-accelerator.c</code></td><td><code>verilator-bnn-accelerator.c</code></td></tr>
+        <tr><td>额外组件</td><td>无</td><td>桥接层 + Verilator 运行库 + 生成的 RTL 模型</td></tr>
+        <tr><td>构建目录</td><td><code>build/soft/</code></td><td><code>build/verilator/</code></td></tr>
+        <tr><td>最终链接器</td><td><code>CC</code></td><td><code>CXX</code></td></tr>
+        <tr><td>额外链接库</td><td><code>-lm</code></td><td><code>-lm -pthread -latomic</code></td></tr>
+        <tr><td>能力上报</td><td>4096 / G=128 / 三种操作</td><td>4096 / G=128 / 三种操作（相同）</td></tr>
+        <tr><td>波形</td><td><span class="no">不支持</span></td><td>设置 <code>BNN_RTL_TRACE_DIR</code> 输出 VCD</td></tr>
+        <tr><td>速度定位</td><td>快速、适合 CI</td><td>功能仿真，<span class="no">不代表硬件性能</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout blue">
+    <p><strong>为什么只换 <code>.c</code> 还不够？</strong>Verilator 后端多出了 C++ 对象和生成模型。为了不让调用方感知，项目用 <code>ar -M</code> 把 <code>Vbnn_core_top__ALL.a</code> 展开合并进 <code>libbnn-engine.a</code>，并把最终链接器切到 <code>CXX</code>。这就是 README 里“C 源按 C 编译、最终用 C++ 链接器链接”的原因。</p>
+  </div>
+
+  <div class="codeblock">
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">Makefile · 合并静态归档（节选）</span><span class="lang">Make</span></div>
+<pre><code>@{ printf 'CREATE %s\n' '$@.tmp'; \
+   for obj in $(ENGINE_OBJECTS) $(BACKEND_OBJECTS); do \
+       printf 'ADDMOD %s\n' "$$obj"; done; \
+   printf 'ADDLIB %s\nSAVE\nEND\n' '$(RTL_LIBRARY)'; \
+} | $(AR) -M
+mv $@.tmp $@</code></pre>
+  </div>
+  <p class="code-caption"><code>ADDLIB</code> 会展开生成的 RTL 归档，把其中对象一起放进最终归档。这样嵌入程序不必知道 Verilator 内部结构。</p>
+</section>
+
+<section class="wrap section" id="device">
+  <div class="section-head">
+    <div class="section-index">04 / 08</div>
+    <div>
+      <h2>设备句柄：公共形状不变，内部多了一个仿真器</h2>
+      <p class="section-intro">因为 <code>BNN_Device</code> 是不透明指针，后端可以自由改变结构体内容而不破坏调用方。Verilator 版唯一的结构性新增，就是 <code>sim</code> 指针。</p>
+    </div>
+  </div>
+
+  <div class="code-pair">
+    <div>
+      <div class="pair-label"><span class="dot soft"></span>soft · 只需要资源计数</div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">soft-bnn-accelerator.c</span><span class="lang">C</span></div>
+<pre><code>struct bnn_accel_device {
+    size_t matrix_count;
+    size_t buffer_count;
+};</code></pre>
+      </div>
+    </div>
+    <div>
+      <div class="pair-label"><span class="dot rtl"></span>verilator · 每个设备拥有自己的仿真实例</div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c</span><span class="lang">C</span></div>
+<pre><code>struct bnn_accel_device {
+    size_t matrix_count;
+    size_t buffer_count;
+    <span class="hl-line">BNN_RtlSim* sim;   <span class="c-com">/* 仿真器实例 */</span></span>
+};</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="code-pair" style="margin-top:18px">
+    <div>
+      <div class="pair-label"><span class="dot rtl"></span>打开设备：额外创建仿真器</div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:134-160</span><span class="lang">C</span></div>
+<pre><code>device = calloc(1, sizeof *device);
+if (device == NULL) return BNN_ENOMEM;
+
+<span class="hl-line">status = bnn_rtl_create(&amp;device-&gt;sim);</span>
+<span class="hl-line">if (status != BNN_OK) {</span>
+<span class="hl-line">    free(device);</span>
+<span class="hl-line">    return status;</span>
+<span class="hl-line">}</span>
+
+*out_device = device;
+return BNN_OK;</code></pre>
+      </div>
+    </div>
+    <div>
+      <div class="pair-label"><span class="dot rtl"></span>关闭设备：销毁仿真器</div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:162-172</span><span class="lang">C</span></div>
+<pre><code>if (device-&gt;matrix_count != 0 ||
+    device-&gt;buffer_count != 0)
+    return BNN_EBUSY;
+
+<span class="hl-line">bnn_rtl_destroy(device-&gt;sim);</span>
+free(device);
+return BNN_OK;</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <p style="margin-top:18px">桥接层在 <code>bnn_rtl_create</code> 里完成三件事：创建 <code>VerilatedContext</code>（单线程），构造生成的 <code>Vbnn_core_top</code>，并把核心复位到空闲状态。如果设置了波形目录，还会在这里注册 VCD。</p>
+
+  <div class="codeblock">
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:28-46 · 仿真实例</span><span class="lang">C++</span></div>
+<pre><code>struct bnn_rtl_sim {
+    VerilatedContext context;
+    std::unique_ptr&lt;Vbnn_core_top&gt; core;
+    std::unique_ptr&lt;VerilatedVcdC&gt; trace;
+
+    bnn_rtl_sim() {
+        context.threads(1);
+        <span class="c-com">// 必须在模型第一次 eval 之前打开 trace。</span>
+        context.traceEverOn(true);
+        core.reset(new Vbnn_core_top(&amp;context));
+    }
+};</code></pre>
+  </div>
+
+  <h3 style="margin-top:30px">同一个 API 调用，在两种后端里实际做什么</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>公共调用</th><th>ACCE=soft</th><th>ACCE=verilator</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>BNN_DeviceOpen</code></td>
+          <td>校验设备号/浮点格式，<code>calloc</code> 一个设备。</td>
+          <td>同样校验，再调用 <code>bnn_rtl_create</code> 建 context、模型并复位。</td>
+        </tr>
+        <tr>
+          <td><code>BNN_MatrixCreate</code></td>
+          <td>校验尺寸/scale，<code>malloc</code> 并复制权重与 scale 到主机内存。</td>
+          <td>校验逻辑相同；也复制到主机内存。<span class="no">没有持久化的“设备权重内存”</span>，权重每次任务由桥接层流式送入。</td>
+        </tr>
+        <tr>
+          <td><code>BNN_BufferAlloc</code><br><code>BNN_BufferWrite/Read</code></td>
+          <td>主机 <code>malloc</code> + <code>memcpy</code>。</td>
+          <td>完全相同。仿真后端用主机内存模拟设备缓冲语义。</td>
+        </tr>
+        <tr>
+          <td><code>BNN_Execute</code></td>
+          <td>逐行调用 <code>ComputeRow</code>，全部算术在 CPU。</td>
+          <td>逐行调用 <code>bnn_rtl_dot_groups</code>；RTL 算整数点积，返回后用 <code>StoreRow</code> 做 FP32 后处理。</td>
+        </tr>
+        <tr>
+          <td><code>BNN_DeviceClose</code></td>
+          <td>检查无存活资源后 <code>free</code>。</td>
+          <td>检查无存活资源后销毁仿真器（结束 VCD），再 <code>free</code>。</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="callout">
+    <p><strong>这不是总线级仿真。</strong>仿真后端的“设备内存”仍是主机堆内存；<code>MatrixCreate</code> 不会把权重烧进 RTL，<code>BufferWrite</code> 也不会触发 DMA。真正跨过软件/硬件边界的，只有 <code>Execute</code> 期间桥接层逐周期送给 RTL 的激活与权重位。这是<strong>功能性协同仿真</strong>，用来验证算术与接口时序，不建模总线延迟和存储带宽。</p>
+  </div>
+</section>
+
+<section class="wrap section" id="execute">
+  <div class="section-head">
+    <div class="section-index">05 / 08</div>
+    <div>
+      <h2>Execute：真正分叉的地方</h2>
+      <p class="section-intro">两个后端的 <code>BNN_Execute</code> 前半段几乎一模一样：参数检查、归属检查、容量检查、舍入模式检查、逐行拒绝 <code>INT8_MIN</code>。直到开始计算，才出现两条路。</p>
+    </div>
+  </div>
+
+  <div class="check-strip" aria-label="公共检查">
+    <span>操作合法，GEMV 必须 rows=1</span>
+    <span>矩阵/缓冲区属于同一设备</span>
+    <span>input ≠ output</span>
+    <span>offset / stride / 容量都在范围内</span>
+    <span>GEMV/GEMM 要求 FE_TONEAREST</span>
+    <span>所有输入行都不含 -128</span>
+  </div>
+
+  <div class="grid-2" style="align-items:start">
+    <article class="flow-card soft-flow">
+      <div class="flow-title"><span class="dot soft"></span><strong>软件后端</strong><span class="badge">soft</span></div>
+      <p>所有行在 C 里直接算。每个组先求激活总和 <code>totals[g]</code>，再利用“权重只有 ±1”把点积化成 <code>2 × 正权重位置之和 − 总和</code>。</p>
+      <div class="flow-line">
+        <div class="ln">for each row m</div>
+        <div class="ar">↓</div>
+        <div class="ln">ComputeRow(matrix, x, y, op)</div>
+        <div class="ar">↓</div>
+        <div class="ln">pos → dot = 2*pos − totals[g]</div>
+        <div class="ar">↓</div>
+        <div class="ln">DOT_GROUPS ? 写 int32 : scale·dot + acc</div>
+      </div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">soft-bnn-accelerator.c:342-395</span><span class="lang">C</span></div>
+<pre><code>dot = 2 * pos - totals[g];
+
+if (operation == BNN_OP_DOT_GROUPS) {
+    memcpy(y + index * sizeof dot, &amp;dot, sizeof dot);
+} else {
+    float scale = HalfToFloat(matrix-&gt;scale_fp16[index]);
+    float term  = FloatMultiply(scale, (float)dot);
+    acc = FloatAdd(acc, term);
+}</code></pre>
+      </div>
+    </article>
+
+    <article class="flow-card rtl-flow">
+      <div class="flow-title"><span class="dot rtl"></span><strong>仿真后端</strong><span class="badge">verilator</span></div>
+      <p>整数点积交给 RTL。每行调用一次桥接层，得到 <code>N × groups</code> 个 int32；随后 <code>StoreRow</code> 决定是直接拷贝，还是做 FP16 scale + FP32 累加。</p>
+      <div class="flow-line">
+        <div class="ln">for each row m</div>
+        <div class="ar">↓</div>
+        <div class="ln">bnn_rtl_dot_groups(..., dots, 0)</div>
+        <div class="ar">↓</div>
+        <div class="ln">RTL: D[n][g] int32</div>
+        <div class="ar">↓</div>
+        <div class="ln">StoreRow(...) → 写输出</div>
+      </div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:466-480</span><span class="lang">C</span></div>
+<pre><code>status = bnn_rtl_dot_groups(device-&gt;sim, x,
+    matrix-&gt;weight_bits, matrix-&gt;in_features,
+    matrix-&gt;out_features, RTL_GROUP_SIZE, dots, 0);
+if (status != BNN_OK) { free(dots); return status; }
+
+StoreRow(matrix, dots, dot_bytes, y, job-&gt;operation);</code></pre>
+      </div>
+    </article>
+  </div>
+
+  <div class="formula-band">
+    <div class="f">D[m][n][g] = Σ<sub>k∈g</sub> X[m][k] · W[n][k]<span class="where">RTL · 32 lane 整数点积</span></div>
+    <div class="split-arrow">整数结果<br>跨过边界 ↓</div>
+    <div class="f">Z[m][n] = Σ<sub>g</sub> FP32(scale[n][g]) · D[m][n][g]<span class="where">C · FP16 解码 + FP32 顺序累加</span></div>
+  </div>
+
+  <div class="grid-2" style="align-items:start">
+    <div>
+      <h3>为什么浮点不一起放进 RTL？</h3>
+      <p>当前的 <code>bnn_core_top</code> 是纯整数核心：它没有 FP16 scale 输入，也没有浮点乘法/累加单元。与其在 RTL 里新造一套浮点路径，不如把“整数点积”这个清晰的边界交给硬件，把公共 API 要求的 FP32 后处理继续留在 C 中。</p>
+      <p>更重要的是，这样能复用与软件后端完全相同的 <code>HalfToFloat</code>、<code>FloatMultiply</code>、<code>FloatAdd</code> 实现。RTL 的整数结果只要与软件公式一致，最终输出就能做到逐字节相同，而不是“数值上接近”。</p>
+    </div>
+    <div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:350-383 · StoreRow</span><span class="lang">C</span></div>
+<pre><code>if (operation == BNN_OP_DOT_GROUPS) {
+    memcpy(y, dots, dot_bytes);
+    return;
+}
+
+for (n = 0; n &lt; matrix-&gt;out_features; ++n) {
+    float acc = 0.0f;
+    for (g = 0; g &lt; matrix-&gt;groups; ++g) {
+        size_t index = (size_t)n * matrix-&gt;groups + g;
+        int32_t dot;
+        uint16_t scale_bits;
+        memcpy(&amp;dot, (const unsigned char*)dots
+               + index * sizeof dot, sizeof dot);
+        memcpy(&amp;scale_bits, (const unsigned char*)matrix-&gt;scale_fp16
+               + index * sizeof scale_bits, sizeof scale_bits);
+        scale = HalfToFloat(scale_bits);
+        term  = FloatMultiply(scale, (float)dot);
+        acc   = FloatAdd(acc, term);
+    }
+    memcpy(y + (size_t)n * sizeof acc, &amp;acc, sizeof acc);
+}</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <div class="callout">
+    <p><strong>一个容易忽略的边界：</strong>RTL 核心本身支持完整 int8 范围，包括 <code>-128</code>；但公共 API 规定输入必须落在 <code>[-127, 127]</code>。因此 verilator 后端在进入桥接层之前，就已经逐行拒绝 <code>INT8_MIN</code>，和软件后端保持完全相同的错误语义。桥接层自己的测试则明确覆盖了 <code>-128</code>，证明限制来自 API 层，而不是 RTL 算不了。</p>
+  </div>
+
+  <p class="small muted"><code>dots</code> 缓冲区在行循环外只分配一次，所有行和所有操作复用；对 GEMM 来说，每行一次桥接调用，但不会每行重新分配结果缓冲。</p>
+</section>
+
+<section class="wrap section" id="bridge">
+  <div class="section-head">
+    <div class="section-index">06 / 08</div>
+    <div>
+      <h2>桥接层：把一次函数调用拆成一个个时钟周期</h2>
+      <p class="section-intro">这是整条链路里最“硬件”的部分。桥接层同时扮演三个角色：命令发起者、激活/权重供数者、结果接收者。它每拍驱动一次 Verilator 模型，直到收到完整的 <code>done</code> 握手。</p>
+    </div>
+  </div>
+
+  <div class="journey" id="journey">
+    <div class="journey-nav" role="tablist" aria-label="一次 Execute 的旅程">
+      <button class="jstep" type="button" role="tab" aria-selected="true" aria-controls="jp-0" id="jt-0"><span class="n">01</span>建仿真器</button>
+      <button class="jstep" type="button" role="tab" aria-selected="false" aria-controls="jp-1" id="jt-1" tabindex="-1"><span class="n">02</span>备好权重</button>
+      <button class="jstep" type="button" role="tab" aria-selected="false" aria-controls="jp-2" id="jt-2" tabindex="-1"><span class="n">03</span>写入输入</button>
+      <button class="jstep" type="button" role="tab" aria-selected="false" aria-controls="jp-3" id="jt-3" tabindex="-1"><span class="n">04</span>公共校验</button>
+      <button class="jstep" type="button" role="tab" aria-selected="false" aria-controls="jp-4" id="jt-4" tabindex="-1"><span class="n">05</span>发命令</button>
+      <button class="jstep" type="button" role="tab" aria-selected="false" aria-controls="jp-5" id="jt-5" tabindex="-1"><span class="n">06</span>流式喂数</button>
+      <button class="jstep" type="button" role="tab" aria-selected="false" aria-controls="jp-6" id="jt-6" tabindex="-1"><span class="n">07</span>收结果</button>
+      <button class="jstep" type="button" role="tab" aria-selected="false" aria-controls="jp-7" id="jt-7" tabindex="-1"><span class="n">08</span>后处理/读回</button>
+    </div>
+    <div class="journey-body">
+      <article class="jpanel active" id="jp-0" role="tabpanel" aria-labelledby="jt-0">
+        <div class="jpanel-top"><h3>建一个属于本设备的仿真器</h3><span class="stage-tag">DeviceOpen</span></div>
+        <p><code>BNN_DeviceOpen</code> 通过公共校验后，verilator 后端调用 <code>bnn_rtl_create</code>。桥接层创建 <code>VerilatedContext</code>（单线程），构造生成的 <code>Vbnn_core_top</code>，可选打开 VCD，然后把核心复位。</p>
+        <ul>
+          <li>每个 <code>BNN_Device</code> 拥有自己的 context 和模型，互不共享状态。</li>
+          <li>复位会把命令、数据、结果、完成接口全部清零，并推进两个时钟周期。</li>
+        </ul>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:33-38</span><span class="lang">C++</span></div>
+<pre><code>context.threads(1);
+context.traceEverOn(true);
+core.reset(new Vbnn_core_top(&amp;context));</code></pre></div>
+        <div class="journey-foot"><span class="ref">bnn_rtl_create · reset · trace 注册</span></div>
+      </article>
+
+      <article class="jpanel" id="jp-1" role="tabpanel" aria-labelledby="jt-1" hidden>
+        <div class="jpanel-top"><h3>把权重放进矩阵对象</h3><span class="stage-tag">MatrixCreate</span></div>
+        <p><code>BNN_MatrixCreate</code> 的校验逻辑与 soft 基本相同：检查尺寸、<code>group_size == 128</code>、scale 不含 NaN/Inf、<code>weight_bytes</code> 与 <code>scale_count</code> 精确匹配，然后把数据复制到矩阵自己持有的主机内存。</p>
+        <ul>
+          <li>此时没有“下载到设备”的动作；RTL 核心没有权重存储器。</li>
+          <li>真正送权重发生在每次 <code>Execute</code>：桥接层按通道、按 32 元素块流式发送。</li>
+        </ul>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:244-255</span><span class="lang">C</span></div>
+<pre><code>matrix-&gt;weight_bits = malloc(weight_bytes);
+matrix-&gt;scale_fp16  = malloc(scale_bytes);
+...
+memcpy(matrix-&gt;weight_bits, desc-&gt;weight_bits, weight_bytes);
+memcpy(matrix-&gt;scale_fp16,  desc-&gt;scale_fp16,  scale_bytes);</code></pre></div>
+        <div class="journey-foot"><span class="ref">数据已复制，调用者可以释放原数组</span></div>
+      </article>
+
+      <article class="jpanel" id="jp-2" role="tabpanel" aria-labelledby="jt-2" hidden>
+        <div class="jpanel-top"><h3>输入先写进 Buffer</h3><span class="stage-tag">BufferWrite</span></div>
+        <p><code>BNN_BufferWrite</code> 做范围检查，然后 <code>memcpy</code>。在仿真后端里，<code>BNN_Buffer</code> 就是主机上的一块 <code>malloc</code> 内存，用来模拟“设备缓冲区”的语义。</p>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:324-335</span><span class="lang">C</span></div>
+<pre><code>if (!RangeFits(buffer-&gt;bytes, offset, bytes))
+    return BNN_ERANGE;
+
+if (bytes != 0)
+    memcpy(buffer-&gt;data + offset, src, bytes);</code></pre></div>
+        <div class="journey-foot"><span class="ref">这里没有 DMA，也没有周期开销</span></div>
+      </article>
+
+      <article class="jpanel" id="jp-3" role="tabpanel" aria-labelledby="jt-3" hidden>
+        <div class="jpanel-top"><h3>公共检查全部先做完</h3><span class="stage-tag">Execute · 前置</span></div>
+        <p><code>BNN_Execute</code> 先做与 soft 相同的参数/范围检查，逐行确认没有 <code>INT8_MIN</code>，然后只分配一次 <code>dots</code>（<code>N × groups</code> 个 int32），再进入行循环。</p>
+        <ul>
+          <li>任何检查失败都不会留下部分输出。</li>
+          <li><code>dots</code> 与公共输出布局无关，只作为桥接层的临时结果区。</li>
+        </ul>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:447-464</span><span class="lang">C</span></div>
+<pre><code>/* 整个 job 只分配一次行结果缓冲区 */
+dots = malloc(dot_bytes);
+if (dots == NULL) return BNN_ENOMEM;
+
+for (m = 0; m &lt; job-&gt;rows; ++m) {
+    const int8_t* x = ...;
+    unsigned char* y = ...;
+    status = bnn_rtl_dot_groups(..., dots, 0);
+    ...
+}</code></pre></div>
+        <div class="journey-foot"><span class="ref">行循环之前，所有输入已经验证完毕</span></div>
+      </article>
+
+      <article class="jpanel" id="jp-4" role="tabpanel" aria-labelledby="jt-4" hidden>
+        <div class="jpanel-top"><h3>发命令：K / G / N 变成三个计数字段</h3><span class="stage-tag">cmd handshake</span></div>
+        <p>桥接层先确认核心处于 idle 且 <code>cmd_ready</code> 为 1，然后写入三个尺寸字段，并让 <code>cmd_valid</code> 保持到命令被接收。结果和完成通道则提前置 <code>ready</code>。</p>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:174-178</span><span class="lang">C++</span></div>
+<pre><code>if (!core.status_idle || !core.cmd_ready)
+    return recover(sim, BNN_EIO);
+
+core.cmd_k_blocks  = blocks;          // K / 32
+core.cmd_group_div = group_size / 32; // G / 32
+core.cmd_out_chans = out_features;    // N
+core.res_ready  = 1;
+core.done_ready = 1;</code></pre></div>
+        <div class="journey-foot"><span class="ref">cmd_valid 不撤销，直到 cmd_ready 采样为 1</span></div>
+      </article>
+
+      <article class="jpanel" id="jp-5" role="tabpanel" aria-labelledby="jt-5" hidden>
+        <div class="jpanel-top"><h3>流式喂数：每拍 32 个 k</h3><span class="stage-tag">act / weight</span></div>
+        <p>命令被接收后，桥接层每个周期同时给 <code>act_valid</code> 和 <code>weight_valid</code>。只要两路 ready 允许，一拍推进 32 个 k：32 个激活（8 个 32-bit word）和 32 个权重位（1 个 32-bit word）。</p>
+        <ul>
+          <li>流是<strong>通道优先</strong>：先送完 channel 0 的全部 block，再送 channel 1。</li>
+          <li>同一组激活会在每个输出通道重放一次，因为核心没有内部激活缓存。</li>
+          <li><code>act_last</code>/<code>weight_last</code> 只在每个通道最后一拍为 1。</li>
+        </ul>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:183-201</span><span class="lang">C++</span></div>
+<pre><code>const size_t block   = size_t(sent % blocks);
+const size_t channel = size_t(sent / blocks);
+const size_t offset  = block * 32;
+
+for (unsigned word = 0; word &lt; 8; ++word) { /* 32 个 int8 */ }
+const size_t weight_offset =
+    channel * (in_features / 8) + block * 4;
+
+core.act_last = block == blocks - 1;
+core.weight_last = core.act_last;</code></pre></div>
+        <div class="journey-foot"><span class="ref">input_beats = (K/32) × N</span></div>
+      </article>
+
+      <article class="jpanel" id="jp-6" role="tabpanel" aria-labelledby="jt-6" hidden>
+        <div class="jpanel-top"><h3>收结果：N × groups 个 int32</h3><span class="stage-tag">res / done</span></div>
+        <p>结果按 <code>[channel][group]</code> 顺序返回。桥接层用 <code>received</code> 计数校验组号与边界标志，把 <code>res_data</code> 逐个复制到 <code>dots</code>。最后等待 <code>done</code> 握手，检查状态和收发数量。</p>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:208-232</span><span class="lang">C++</span></div>
+<pre><code>if (core.res_valid &amp;&amp; core.res_ready) {
+    if (received &gt;= result_count ||
+        core.res_group_idx != received % groups ||
+        bool(core.res_chan_last) != (received % groups == groups - 1) ||
+        bool(core.res_last) != (received == result_count - 1))
+        return recover(sim, BNN_EIO);
+    const uint32_t bits = core.res_data;
+    std::memcpy(output + size_t(received), &amp;bits, sizeof bits);
+    ++received;
+}
+
+if (done) {
+    if (status != 0 || !accepted ||
+        sent != input_beats || received != result_count)
+        return recover(sim, BNN_EIO);
+    return BNN_OK;
+}</code></pre></div>
+        <div class="journey-foot"><span class="ref">成功完成 = 命令已收 + 输入送够 + 结果收够 + status 0</span></div>
+      </article>
+
+      <article class="jpanel" id="jp-7" role="tabpanel" aria-labelledby="jt-7" hidden>
+        <div class="jpanel-top"><h3>后处理与读回</h3><span class="stage-tag">StoreRow / BufferRead</span></div>
+        <p>回到 <code>BNN_Execute</code>，<code>StoreRow</code> 把 <code>dots</code> 变成公共 API 的输出：DOT_GROUPS 直接拷贝；GEMV/GEMM 用 FP16 scale 乘 int32，再按组做 FP32 累加。最后 <code>BNN_BufferRead</code> 把结果复制给调用者。</p>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-accelerator.c:358-379</span><span class="lang">C</span></div>
+<pre><code>if (operation == BNN_OP_DOT_GROUPS) {
+    memcpy(y, dots, dot_bytes);
+    return;
+}
+
+scale = HalfToFloat(scale_bits);
+term  = FloatMultiply(scale, (float)dot);
+acc   = FloatAdd(acc, term);</code></pre></div>
+        <div class="journey-foot"><span class="ref">整数来自 RTL，浮点舍入来自 C</span></div>
+      </article>
+
+      <div class="journey-foot">
+        <span class="ref">键盘 ↑ ↓ 或点击左侧步骤切换</span>
+        <button class="jbtn" type="button" data-jump="-1">← 上一步</button>
+        <span class="js-count">01 / 08</span>
+        <button class="jbtn" type="button" data-jump="1">下一步 →</button>
+      </div>
+    </div>
+  </div>
+  <noscript><style>.jpanel{display:block!important;margin-bottom:22px}.journey-foot:last-child{display:none}</style><p class="small muted">当前未启用 JavaScript，已展开全部步骤。</p></noscript>
+
+  <div class="subhead"><span class="sn">6.1</span><h3>一拍里到底装了什么</h3></div>
+  <p>RTL 的 32 条 lane 一次处理 32 个 k 位置。桥接层把连续的 4 个 <code>int8</code> 塞进一个 32-bit word，共 8 个 word；权重则按位打包成一个 32-bit word，bit <code>i</code> 对应 lane <code>i</code>。</p>
+
+  <div class="beat-grid" aria-label="一个激活 beat 的 8 个 word">
+    <div class="word"><b>act[0]</b>k0–k3<span>4 × int8</span></div>
+    <div class="word"><b>act[1]</b>k4–k7<span>4 × int8</span></div>
+    <div class="word"><b>act[2]</b>k8–k11<span>4 × int8</span></div>
+    <div class="word"><b>act[3]</b>k12–k15<span>4 × int8</span></div>
+    <div class="word"><b>act[4]</b>k16–k19<span>4 × int8</span></div>
+    <div class="word"><b>act[5]</b>k20–k23<span>4 × int8</span></div>
+    <div class="word"><b>act[6]</b>k24–k27<span>4 × int8</span></div>
+    <div class="word"><b>act[7]</b>k28–k31<span>4 × int8</span></div>
+  </div>
+  <div class="weight-strip"><b>weight_data[31:0]</b><span class="bits" aria-hidden="true"></span><span style="font-size:9.5px;color:#9e988d">bit i = W[n][k0+i]，1 → +1，0 → −1</span></div>
+  <p class="beat-caption">激活按字节小端拼装（byte 0 落在 bit 0..7）；权重按位平铺。两者在同一拍成对握手，核心不会单独消费其中一路。</p>
+
+  <div class="codeblock">
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:183-201 · 打包</span><span class="lang">C++</span></div>
+<pre><code>const size_t block   = size_t(sent % blocks);
+const size_t channel = size_t(sent / blocks);
+const size_t offset  = block * 32;
+
+for (unsigned word = 0; word &lt; 8; ++word) {
+    uint32_t packed = 0;
+    for (unsigned byte = 0; byte &lt; 4; ++byte)
+        packed |= uint32_t(uint8_t(input[offset + word * 4 + byte]))
+                  &lt;&lt; (byte * 8);
+    core.act_data[word] = packed;
+}
+
+const size_t weight_offset =
+    channel * (in_features / 8) + block * 4;
+uint32_t packed = 0;
+for (unsigned byte = 0; byte &lt; 4; ++byte)
+    packed |= uint32_t(weights[weight_offset + byte]) &lt;&lt; (byte * 8);
+core.weight_data = packed;</code></pre>
+  </div>
+
+  <div class="subhead"><span class="sn">6.2</span><h3>通道优先，以及“激活重放”</h3></div>
+  <p>核心一次命令只处理“一个输入向量 × N 个输出通道”。它没有内部激活缓存，因此桥接层必须按输出通道重复送同一组激活。总拍数不是 <code>K/32</code>，而是 <code>(K/32) × N</code>。</p>
+
+  <div class="stream">
+    <div class="stream-row">
+      <span class="stream-label">channel 0</span>
+      <div class="blocks">
+        <span class="block replay">block 0</span><span class="block replay">block 1</span><span class="block replay">…</span><span class="block replay">block B−1</span>
+      </div>
+    </div>
+    <div class="stream-row">
+      <span class="stream-label">channel 1</span>
+      <div class="blocks">
+        <span class="block replay">block 0</span><span class="block replay">block 1</span><span class="block replay">…</span><span class="block replay">block B−1</span>
+      </div>
+    </div>
+    <div class="stream-row">
+      <span class="stream-label">…</span>
+      <div class="blocks"><span class="block">同一组 X，再送一遍</span></div>
+    </div>
+    <div class="stream-row">
+      <span class="stream-label">channel N−1</span>
+      <div class="blocks">
+        <span class="block replay">block 0</span><span class="block replay">block 1</span><span class="block replay">…</span><span class="block replay">block B−1</span>
+      </div>
+    </div>
+  </div>
+  <p class="stream-note"><code>B = K / 32</code>。每个通道的最后一拍同时拉高 <code>act_last</code> 与 <code>weight_last</code>。这里的 last 是<strong>通道边界</strong>，不是逻辑组边界；组边界由核心内部的 <code>cmd_group_div</code> 计数产生。</p>
+
+  <div class="callout green">
+    <p><strong>为什么这个细节重要？</strong>如果只按 <code>K/32</code> 送数，只会算完一个输出通道。真实加速器通常会在设备侧缓存激活；当前这个核心明确把重放责任交给外层。README 也把“不要直接把重放变成重复主机上传”列为后续设备调度层要优化的事情。</p>
+  </div>
+
+  <div class="subhead"><span class="sn">6.3</span><h3>逐周期循环与握手</h3></div>
+  <p>桥接层的主循环可以概括为：准备本拍输入 → <code>eval()</code> → 采样握手 → <code>tick()</code> 推进一个 10 ns 周期。命令、输入、结果、完成四个通道都用 ready/valid 握手。</p>
+
+  <div class="table-wrap">
+    <table class="handshake-table">
+      <thead><tr><th>通道</th><th>桥接层动作</th><th>完成条件</th></tr></thead>
+      <tbody>
+        <tr><td><code>cmd_valid/ready</code></td><td>写 <code>k_blocks/group_div/out_chans</code>，保持 valid 不撤销</td><td><code>cmd_valid &amp;&amp; cmd_ready</code> 同拍为 1</td></tr>
+        <tr><td><code>act_valid/ready</code><br><code>weight_valid/ready</code></td><td>按通道和 block 提供激活与权重；两路 valid 同起同落</td><td>两路同拍握手；单独一路握手视为协议错误</td></tr>
+        <tr><td><code>res_valid/ready</code></td><td><code>res_ready = 1</code>；校验组号、通道末标志、全局末标志</td><td>收满 <code>N × groups</code> 个 int32</td></tr>
+        <tr><td><code>done_valid/ready</code></td><td><code>done_ready = 1</code>；读取 <code>done_status</code></td><td>status=0，且发送/接收计数完全匹配</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="codeblock">
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:180-232 · 主循环骨架（节选）</span><span class="lang">C++</span></div>
+<pre><code>for (uint64_t cycle = 0; cycle &lt; max_cycles; ++cycle) {
+    core.cmd_valid    = !accepted;
+    core.act_valid    = accepted &amp;&amp; sent &lt; input_beats;
+    core.weight_valid = core.act_valid;
+    if (core.act_valid) { <span class="c-com">/* 打包 32 个激活和 32 个权重位 */</span> }
+
+    core.eval();
+    if (sim-&gt;context.gotFinish()) return recover(sim, BNN_EIO);
+
+    const bool cmd_fire    = core.cmd_valid &amp;&amp; core.cmd_ready;
+    const bool act_fire    = core.act_valid &amp;&amp; core.act_ready;
+    const bool weight_fire = core.weight_valid &amp;&amp; core.weight_ready;
+    if (act_fire != weight_fire) return recover(sim, BNN_EIO);
+
+    if (core.res_valid &amp;&amp; core.res_ready) { <span class="c-com">/* 校验并收集 int32 */</span> }
+
+    const bool done = core.done_valid &amp;&amp; core.done_ready;
+    const unsigned status = core.done_status;
+    if (cmd_fire) accepted = true;
+    if (act_fire) ++sent;
+
+    sim-&gt;tick();
+
+    if (done) {
+        if (status != 0 || !accepted ||
+            sent != input_beats || received != result_count)
+            return recover(sim, BNN_EIO);
+        <span class="c-com">/* 撤销 valid，flush 波形，返回 BNN_OK */</span>
+    }
+}
+return recover(sim, BNN_ETIMEOUT);</code></pre>
+  </div>
+
+  <div class="code-pair">
+    <div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:74-84 · tick()</span><span class="lang">C++</span></div>
+<pre><code>if (trace) trace-&gt;dump(context.time());
+context.timeInc(5000);   <span class="c-com">// 5 ns</span>
+core-&gt;clock = 1;
+core-&gt;eval();            <span class="c-com">// 上升沿</span>
+if (trace) trace-&gt;dump(context.time());
+context.timeInc(5000);   <span class="c-com">// 再 5 ns</span>
+core-&gt;clock = 0;
+core-&gt;eval();            <span class="c-com">// 低相位</span></code></pre>
+      </div>
+      <p class="code-caption">仿真时钟周期 10 ns，仅用于波形时间轴，不代表可综合频率。</p>
+    </div>
+    <div>
+      <div class="codeblock">
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:110-119 · 失败恢复</span><span class="lang">C++</span></div>
+<pre><code>static BNN_Status recover(BNN_RtlSim* sim, BNN_Status status) noexcept {
+    try {
+        ContextScope scope(&amp;sim-&gt;context);
+        sim-&gt;reset();
+        sim-&gt;flush_trace();
+    } catch (...) {
+        return BNN_EIO;
+    }
+    return status;
+}</code></pre>
+      </div>
+      <p class="code-caption">复位后模型回到 idle，下一个任务可以继续使用同一个设备。</p>
+    </div>
+  </div>
+
+  <div class="subhead"><span class="sn">6.4</span><h3>超时、上下文与波形</h3></div>
+  <div class="error-cards">
+    <div class="error-card">
+      <h4>周期预算 <span class="k">timeout</span></h4>
+      <p>默认预算是 <code>input_beats + result_count + 64</code>。预算耗尽还没收到 <code>done</code>，桥接层复位模型并返回 <code>BNN_ETIMEOUT</code>。专项测试会故意传 <code>max_cycles=1</code> 触发超时，然后立刻再跑一个正常任务，确认恢复有效。</p>
+    </div>
+    <div class="error-card">
+      <h4>异常不穿过 C ABI <span class="k">noexcept</span></h4>
+      <p>桥接函数的边界不抛 C++ 异常：<code>std::bad_alloc</code> 映射为 <code>BNN_ENOMEM</code>，其他异常映射为 <code>BNN_EIO</code>。出错路径同样会复位模型，避免把半完成状态留给下一个任务。</p>
+    </div>
+    <div class="error-card">
+      <h4>宿主上下文 <span class="k">ContextScope</span></h4>
+      <p>Verilator 用线程局部存储保存当前 <code>VerilatedContext</code>。桥接层在 create/destroy/execute/recover 期间临时安装本设备的 context，退出时恢复调用者原来的上下文和时间。嵌入到其他 Verilator 程序时不会污染宿主状态。</p>
+    </div>
+    <div class="error-card">
+      <h4>波形开关 <span class="k">VCD</span></h4>
+      <p><code>BNN_RTL_TRACE_DIR</code> 在创建设备时读取。设为已有可写目录，就为每个设备生成一个唯一的 <code>bnn-core-XXXXXX.vcd</code>；目录不存在则 <code>BNN_EIO</code>。每次任务结束或超时恢复后 flush，关闭设备时结束文件。</p>
+    </div>
+  </div>
+
+  <div class="codeblock">
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:17-25 · 保存/恢复宿主 context</span><span class="lang">C++</span></div>
+<pre><code>class ContextScope {
+    VerilatedContext* previous;
+public:
+    explicit ContextScope(VerilatedContext* current = nullptr)
+        : previous(Verilated::threadContextp()) {
+        if (current != nullptr) Verilated::threadContextp(current);
+    }
+    ~ContextScope() { Verilated::threadContextp(previous); }
+};</code></pre>
+  </div>
+</section>
+
+<section class="wrap section" id="verify">
+  <div class="section-head">
+    <div class="section-index">07 / 08</div>
+    <div>
+      <h2>怎么确认“换了实现，没换数值”</h2>
+      <p class="section-intro">最有力的验证不是“看起来一样”，而是同一个 C 测试对象分别链接两个后端，把成功输出落盘，再逐字节比较。整数和 FP32 的位模式都必须完全一致。</p>
+    </div>
+  </div>
+
+  <div class="diff-diagram">
+    <div class="diff-col">
+      <div class="diff-node head">同一个测试对象</div>
+      <div class="diff-node"><code>tests/test_bnn_accelerator.c</code><br>只 include 公共头文件</div>
+      <div class="diff-node">C99 编译一次 → <code>test_bnn_accelerator.o</code></div>
+    </div>
+    <div class="diff-arrow" aria-hidden="true">→</div>
+    <div class="diff-col">
+      <div class="diff-node head">两条链接命令</div>
+      <div class="diff-node"><code>cc test.o soft-bnn-accelerator.c -lm</code><br>→ <code>soft-runner</code></div>
+      <div class="diff-node"><code>c++ test.o libbnn-engine.a -pthread -latomic -lm</code><br>→ <code>rtl-runner</code></div>
+      <div class="diff-node">各自运行 → <code>soft.bin</code> / <code>rtl.bin</code></div>
+    </div>
+    <div class="diff-result"><strong>逐字节比较</strong>：<code>soft.bin</code> 与 <code>rtl.bin</code> 完全相同（int32 与 FP32 位模式），任何偏移都直接报错。</div>
+  </div>
+
+  <p>这个测试对象同时覆盖三种操作和大量边界条件。因为调用方代码没有重新编译成“Verilator 版本”，所以它同时验证了两件事：ABI 兼容，以及数值结果一致。</p>
+
+  <div class="coverage">
+    <span>GEMV / GEMM / DOT_GROUPS</span>
+    <span>非零 row_stride</span>
+    <span>非对齐 offset</span>
+    <span>padding 保持不变</span>
+    <span>scale 全范围与次正规数</span>
+    <span>非法输入 / 范围错误</span>
+    <span>句柄归属与 input≠output</span>
+    <span>多设备隔离</span>
+    <span>桥接超时后恢复</span>
+    <span>宿主 Verilator context 保持</span>
+  </div>
+
+  <div class="grid-2" style="align-items:start">
+    <div class="codeblock">
+      <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">终端 · 差分与引擎级测试</span><span class="lang">Shell</span></div>
+<pre><code><span class="c-com"># 构建两种后端</span>
+make ACCE=soft -j2
+make ACCE=verilator -j2
+
+<span class="c-com"># 公共 API 差分 + 桥接 + context 测试</span>
+make ACCE=verilator test-accelerator
+
+<span class="c-com"># 用同一套引擎/CLI 测试跑 Verilator 后端</span>
+make ACCE=verilator test
+
+<span class="c-com"># 只跑波形专项检查（临时目录，自动清理）</span>
+make ACCE=verilator test-trace</code></pre>
+    </div>
+    <div>
+      <h3>这些测试分别在证明什么</h3>
+      <p><code>test-accelerator</code> 编译同一个 C 测试对象两次链接，比较输出字节；同时单独编译桥接测试和 context 测试。它不调用 make，也不修改根目录的 <code>bnn-infer</code>。</p>
+      <p><code>test</code> 复用原有引擎与 CLI 回归（MLP/CNN/GPT/Llama 的合成模型），验证整条推理链路在 RTL 后端下仍能通过 Python reference。</p>
+      <p><code>test-trace</code> 检查波形开关、错误目录、任务后 flush、文件名避重和多设备隔离。</p>
+    </div>
+  </div>
+
+  <div class="callout green">
+    <p><strong>还可以直接看波形。</strong>用很小的任务生成 VCD，先在 GTKWave 里看 <code>clock/reset</code>、<code>cmd_valid/ready</code>、<code>act_valid/ready</code>、<code>weight_valid/ready</code>、<code>res_valid/ready</code>、<code>done_valid/status</code>，再展开内部流水级。完整模型的 VCD 可能很大，建议从 <code>K=128、N=2</code> 的测试开始。</p>
+  </div>
+
+  <div class="codeblock">
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">终端 · 生成一份小波形</span><span class="lang">Shell</span></div>
+<pre><code>python3 tests/test_verilator_trace.py --output-dir build/waves
+<span class="c-com"># 脚本会打印实际 VCD 路径，例如：</span>
+<span class="c-com"># build/waves/bnn-core-XXXXXX.vcd</span>
+gtkwave build/waves/bnn-core-XXXXXX.vcd</code></pre>
+  </div>
+</section>
+
+<section class="wrap section" id="tradeoffs">
+  <div class="section-head">
+    <div class="section-index">08 / 08</div>
+    <div>
+      <h2>这样切的收益，以及它没有解决的问题</h2>
+      <p class="section-intro">把后端选择放在构建期，换来的是零运行时开销和清晰的边界；代价是两套工具链、两个归档，以及仿真速度与真实硬件性能之间的巨大差距。</p>
+    </div>
+  </div>
+
+  <div class="choose">
+    <article class="choose-card soft">
+      <h3>用 ACCE=soft，当……</h3>
+      <ul>
+        <li>你在跑日常回归、CI 或 Python reference 校验，想要最快速度。</li>
+        <li>你只需要验证模型/引擎逻辑，不关心 RTL 时序。</li>
+        <li>你希望嵌入程序用纯 C 工具链链接，依赖最少。</li>
+        <li>你需要一个与硬件实现逐字节对齐的数值参考。</li>
+      </ul>
+    </article>
+    <article class="choose-card rtl">
+      <h3>用 ACCE=verilator，当……</h3>
+      <ul>
+        <li>你要验证 RTL 与公共 API 的接口、握手和结果顺序。</li>
+        <li>你想抓 VCD，逐周期观察命令、供数、结果和完成信号。</li>
+        <li>你在改 <code>bnn-hw/bnn_core</code>，希望整条推理链路立刻跑起来。</li>
+        <li>你能接受明显更慢的仿真速度，并且不需要 DMA/总线模型。</li>
+      </ul>
+    </article>
+  </div>
+
+  <h3 style="margin-top:30px">当前仿真后端刻意没有做的事</h3>
+  <div class="limits">
+    <div class="limit"><span class="x">×</span><div><strong>没有总线、DMA 和存储带宽模型。</strong>桥接层直接写模型端口，一拍送一对操作数；真实设备上的访存延迟、突发传输和带宽瓶颈都不在模型里。</div></div>
+    <div class="limit"><span class="x">×</span><div><strong>没有设备侧激活缓存。</strong>每个输出通道都重放同一组激活，导致 <code>input_beats = (K/32) × N</code>。真实加速器应在本地缓存激活，避免重复主机上传。</div></div>
+    <div class="limit"><span class="x">×</span><div><strong>没有命令队列。</strong>核心是单在途任务；GEMM 的每一行都是一次独立命令，必须等上一行完成。吞吐不代表实际硬件。</div></div>
+    <div class="limit"><span class="x">×</span><div><strong>RTL 只覆盖整数点积。</strong>FP16 scale 解码、乘法和有序 FP32 累加仍在 CPU，因此“上板后”的浮点后处理位置还需要在系统设计中重新决定。</div></div>
+    <div class="limit"><span class="x">×</span><div><strong>不能在同一进程里运行时切换。</strong>两套实现导出同名符号，构建期只能选一个。想要对比，就构建两个可执行文件或两个归档，分别运行。</div></div>
+    <div class="limit"><span class="x">×</span><div><strong>仿真时间不是性能。</strong>10 ns 是为了 VCD 可读性设定的仿真周期，与综合后的时序、面积、功耗无关。</div></div>
+  </div>
+
+  <div class="next-card">
+    <p class="eyebrow">NEXT / 第二部分</p>
+    <h3>把波形拆开：一条命令如何流过 RTL 流水线</h3>
+    <p>下一步可以沿着 <code>bnn_ctrl_fsm → bnn_addertree → bnn_group_acc → bnn_out_slice</code>，看命令状态机、32 lane 加法树、分组累加和弹性输出缓冲如何配合；再结合 VCD 里的 valid/ready 与随机反压测试，理解这套软硬件协同仿真的时序细节。</p>
+  </div>
+</section>
+
+<section class="wrap section" id="glossary">
+  <div class="section-head">
+    <div class="section-index">APPENDIX</div>
+    <div>
+      <h2>术语速查</h2>
+      <p class="section-intro">阅读这条链路时最容易混淆的几个词。</p>
+    </div>
+  </div>
+  <dl class="glossary">
+    <div class="gloss"><dt>ABI</dt><dd>二进制接口。函数名、参数、返回值和调用约定固定后，调用方不需要重新编译就能换实现。</dd></div>
+    <div class="gloss"><dt>不透明句柄</dt><dd>调用者只持有指针，不能访问结构体字段。后端可以自由增删内部成员。</dd></div>
+    <div class="gloss"><dt>RTL</dt><dd>寄存器传输级描述。这里指 <code>bnn-hw/bnn_core</code> 下的 SystemVerilog 核心。</dd></div>
+    <div class="gloss"><dt>Verilator</dt><dd>把可综合 RTL 编译成 C++ 仿真模型的工具；这里同时用到生成模型和 VCD tracing 运行库。</dd></div>
+    <div class="gloss"><dt>DUT</dt><dd>被测设计（Design Under Test）。本项目的 DUT 是 <code>bnn_core_top</code>。</dd></div>
+    <div class="gloss"><dt>ready/valid</dt><dd>握手协议。发送方保持 valid 和数据，接收方用 ready 表示当前拍可以接收。</dd></div>
+    <div class="gloss"><dt>反压</dt><dd>接收方 ready 为低，发送方必须保持数据不变，不能丢拍或提前推进。</dd></div>
+    <div class="gloss"><dt>VCD</dt><dd>值变化转储文件，可用 GTKWave 打开，查看每个周期的信号波形。</dd></div>
+    <div class="gloss"><dt>FP16 / FP32</dt><dd>IEEE-754 半精度/单精度浮点。scale 以 FP16 存储，后处理要求精确转成 FP32。</dd></div>
+    <div class="gloss"><dt>TLS</dt><dd>线程局部存储。Verilator 用它保存当前 <code>VerilatedContext</code>，桥接层需要保存/恢复。</dd></div>
+    <div class="gloss"><dt>W1A8</dt><dd>权重 1 bit（±1），激活 8 bit（int8）。整数点积可用 32 lane 并行计算。</dd></div>
+    <div class="gloss"><dt>差分测试</dt><dd>同一组输入分别跑两个实现，比较输出；这里精确到字节和浮点位模式。</dd></div>
+  </dl>
+</section>
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <div>
+      <h4>参考文件</h4>
+      <ul>
+        <li>bnn-accelerator/bnn-accelerator.h</li>
+        <li>bnn-accelerator/soft-bnn-accelerator.c</li>
+        <li>bnn-accelerator/verilator-bnn-accelerator.c</li>
+        <li>bnn-accelerator/verilator-bnn-bridge.{h,cpp}</li>
+        <li>bnn-hw/bnn_core/*.sv · bnn-hw/README.md</li>
+        <li>Makefile · tests/test_accelerator.py · tests/test_verilator_*.cpp</li>
+      </ul>
+    </div>
+    <div>
+      <h4>说明</h4>
+      <p>基于当前工作区实现整理，聚焦“bnn-accelerator 从软件后端切换到 Verilator 仿真后端”这一层。RTL 内部流水线与波形逐周期解读留到第二部分。</p>
+      <p class="stamp" style="margin-top:10px">2026-10-21 · BNN-train-infer · part 1 / 2</p>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var board = document.getElementById('switchboard');
+  var segBtns = Array.prototype.slice.call(document.querySelectorAll('.seg-btn'));
+  if (board && segBtns.length) {
+    var applyBackend = function (value) {
+      board.dataset.backend = value;
+      segBtns.forEach(function (btn) {
+        btn.setAttribute('aria-pressed', btn.dataset.backend === value ? 'true' : 'false');
+      });
+    };
+    segBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () { applyBackend(btn.dataset.backend); });
+    });
+    applyBackend('soft');
+  }
+
+  var journey = document.getElementById('journey');
+  if (journey) {
+    var tabs = Array.prototype.slice.call(journey.querySelectorAll('.jstep'));
+    var panels = Array.prototype.slice.call(journey.querySelectorAll('.jpanel'));
+    var counter = journey.querySelector('.js-count');
+    var prev = journey.querySelector('[data-jump="-1"]');
+    var next = journey.querySelector('[data-jump="1"]');
+    var current = 0;
+    var select = function (index) {
+      current = Math.max(0, Math.min(tabs.length - 1, index));
+      tabs.forEach(function (tab, i) {
+        var active = i === current;
+        tab.setAttribute('aria-selected', active ? 'true' : 'false');
+        tab.tabIndex = active ? 0 : -1;
+        panels[i].classList.toggle('active', active);
+        panels[i].hidden = !active;
+      });
+      if (counter) {
+        counter.textContent = String(current + 1).padStart(2, '0') + ' / ' + String(tabs.length).padStart(2, '0');
+      }
+      if (prev) prev.disabled = current === 0;
+      if (next) next.disabled = current === tabs.length - 1;
+      tabs[current].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    };
+    tabs.forEach(function (tab, i) {
+      tab.addEventListener('click', function () { select(i); });
+    });
+    if (prev) prev.addEventListener('click', function () { select(current - 1); });
+    if (next) next.addEventListener('click', function () { select(current + 1); });
+    journey.addEventListener('keydown', function (event) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+        event.preventDefault();
+        select(current + 1);
+        if (tabs[current]) tabs[current].focus();
+      } else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+        event.preventDefault();
+        select(current - 1);
+        if (tabs[current]) tabs[current].focus();
+      }
+    });
+    select(0);
+  }
+
+  var links = Array.prototype.slice.call(document.querySelectorAll('.topnav a'));
+  var sections = links.map(function (link) {
+    return document.querySelector(link.getAttribute('href'));
+  }).filter(Boolean);
+  if ('IntersectionObserver' in window && sections.length) {
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        links.forEach(function (link) {
+          link.classList.toggle('active', link.getAttribute('href') === '#' + entry.target.id);
+        });
+      });
+    }, { rootMargin: '-45% 0px -50% 0px' });
+    sections.forEach(function (section) { observer.observe(section); });
+  }
+})();
+</script>
+</body>
+</html>

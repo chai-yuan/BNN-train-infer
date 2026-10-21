@@ -594,6 +594,8 @@ def main():
     parser.add_argument("--binary", type=Path, default=ROOT / "bnn-infer")
     parser.add_argument("--library", type=Path, default=ROOT / "build/soft/libbnn-engine.a")
     parser.add_argument("--cc", default=os.environ.get("CC", "cc"))
+    parser.add_argument("--linker", help="link driver; defaults to --cc")
+    parser.add_argument("--ldlibs", default="-lm", help="libraries required by the engine archive")
     parser.add_argument("--sanitize", action="store_true", help="ASan/UBSan for temporary executables")
     parser.add_argument("--api-only", action="store_true", help="skip CLI regression")
     parser.add_argument("--fixtures-only", type=Path, help="generate fixtures at this directory without compiling")
@@ -621,8 +623,12 @@ def main():
         folder = Path(temporary)
         correct, count, bad_count, generated, gpt, eval_ids = generate(folder)
         runner = folder / "test-bnn-engine"
-        run([*compiler, *flags, "-I", ROOT / "bnn-sw", ROOT / "tests/test_bnn_engine.c",
-             library, *link_flags, "-lm", "-o", runner], env)
+        runner_object = folder / "test-bnn-engine.o"
+        run([*compiler, *flags, "-I", ROOT / "bnn-sw", "-c", ROOT / "tests/test_bnn_engine.c",
+             "-o", runner_object], env)
+        driver_flags = [flag for flag in flags if not flag.startswith("-std=")]
+        run([*shlex.split(args.linker or args.cc), *driver_flags, runner_object, library, *link_flags,
+             *shlex.split(args.ldlibs), "-o", runner], env)
         print(run([runner, folder], env).strip())
         print(f"Failed-load matrix: {bad_count} malformed/missing/unsupported models, two repetitions")
         if not args.api_only:

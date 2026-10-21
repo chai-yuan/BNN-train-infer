@@ -7,11 +7,11 @@
 
 ## 当前进度
 
-目前处于 **C 软件模拟与能力评估阶段**，尚未实现硬件后端。
+目前提供 **C 软件模拟后端和 Verilator RTL 仿真后端**，可以让现有推理链路执行 W1A8 计算核心；尚未接入实际 FPGA/ASIC 设备。
 
 - 已支持 MNIST MLP、MNIST CNN、nanoGPT 以及 Llama-2 的训练导出及 C 推理。
 - 已将模型统一定义在 `bnn-sw`，使用不透明 `BNNE_Engine` 句柄和 `bnn-infer` 演示入口（支持 GPT1 与 LMA1 两类 LLM 格式）。
-- 二值矩阵计算统一通过 `bnn-accelerator.h`；当前由软件实现模拟设备。
+- 二值矩阵计算统一通过 `bnn-accelerator.h`；可选择 C 软件实现或 Verilator RTL 仿真。
 - 已提供 Python logits 正确性校验与分阶段性能统计，不再维护新引擎内的独立参考内核。
 - 已通过合成模型数值回归、错误路径、多句柄隔离及内存检查；现有小型 GPT 模型已通过 Python reference 校验。
 
@@ -25,10 +25,10 @@ logits 校验与性能统计是两类任务共用的选项。
 train-*-export.py       Python 训练、模型导出和参考数据生成
 bnn-infer.c            统一演示入口：分类与文本生成两类任务，附校验与统计
 bnn-sw/                BNNE 引擎、模型加载、工作区和前向实现
-bnn-accelerator/       设备级公共接口及软件模拟后端
+bnn-accelerator/       设备级公共接口、soft/Verilator 后端及 C ABI 仿真桥接
 tests/                 离线回归测试（无需训练或下载数据）
 doc/                   引擎接口及 BNN1、GPT1 文件格式说明
-hw/                    后续硬件实现预留目录
+bnn-hw/                SystemVerilog 计算核心、核心自检测试及接口说明
 ```
 
 调用关系：`应用 → BNNE 引擎 → accelerator 接口 → 软件模拟 / 后续硬件后端`。
@@ -41,8 +41,59 @@ C 端需要支持 C99 的编译器、Make、`ar` 和 POSIX 单调时钟；当前
 make ACCE=soft
 ```
 
-生成 `./bnn-infer` 和 `build/soft/libbnn-engine.a`。目前只支持 `ACCE=soft`，表示链接软件模拟设备，
-不是另一套参考推理算法。新入口没有 `--soft` 参数。
+生成 `./bnn-infer` 和 `build/soft/libbnn-engine.a`。后端在构建时选择，入口没有 `--soft` 参数。
+
+使用当前 SystemVerilog 核心执行整数点积：
+
+```bash
+make ACCE=verilator -j2
+make ACCE=verilator test-accelerator
+make ACCE=verilator test
+```
+
+该后端另需 Verilator（本地验证版本 5.032）和 C++17 编译器，产物为 `build/verilator/libbnn-engine.a`。
+不需要 cocotb、Python 虚拟环境或动态库加载。每个设备拥有独立模型，C++ 桥接层逐周期驱动命令、数据和结果握手；
+DOT_GROUPS 的整数结果直接来自 RTL，GEMV/GEMM 的 scale 和 FP32 组间累加在 C 中完成。
+两种后端具有相同的公共 API 和能力范围。仿真耗时不能代表实际硬件性能。
+
+静态归档包含 C 后端、C++ 桥接、RTL 模型及 Verilator 运行库对象。
+嵌入程序继续按 C 编译，最终使用 C++ 链接器链接归档及 `-lm -pthread -latomic`。
+切换后端时重新执行相应的 `make ACCE=...`，根目录 `bnn-infer` 会重新链接。
+
+### Verilator 波形开关
+
+桥接头文件 `bnn-accelerator/verilator-bnn-bridge.h` 定义 `BNN_RTL_TRACE_DIR_ENV`。
+运行时环境变量 `BNN_RTL_TRACE_DIR` 未设置或为空时不导出波形；设为已有可写目录时，
+每次创建设备生成一个独立的 `bnn-core-XXXXXX.vcd`，覆盖该设备的复位和全部计算任务。
+文件名自动避重，不覆盖旧文件。目录不存在或不可写时，设备创建返回 `BNN_EIO`。
+变量在创建设备时读取，运行期间改变不会影响已有设备。
+
+默认构建已包含 `--trace` 支持，开关无需重新编译。VCD 包含计算核心及子模块，时间单位 1ps，仿真时钟周期 10ns。
+这个时钟周期仅用于波形显示，不代表综合后的时序能力。每次任务结束或超时恢复后刷新文件，关闭设备时结束文件。
+
+先用很小的计算任务生成波形：
+
+```sh
+make ACCE=verilator -j2
+python3 tests/test_verilator_trace.py --output-dir build/waves
+# 脚本会打印两个实际 VCD 路径，任选一个打开：
+# gtkwave build/waves/bnn-core-XXXXXX.vcd
+```
+
+该测试使用 K=128、N=2、G=128、全 1 激活，两个通道分别全正/全负权重，DOT 结果应为 `[128, -128]`。
+测试会检查关闭开关、错误目录、实时刷新、文件避重及两个设备隔离。
+`make ACCE=verilator test-trace` 执行相同检查，但波形存放在临时目录并自动清理。
+
+给任意推理命令启用波形：
+
+```sh
+mkdir -p build/model-waves
+BNN_RTL_TRACE_DIR="$PWD/build/model-waves" ./bnn-infer --profile --ref ref_logits.bin model.bnn
+```
+
+建议先调试小型任务，完整模型的 VCD 可能很大。只在这条命令前设置变量即可；不设置该变量的后续运行仍关闭导出。
+GTKWave 中先查看 `clock/reset`、`cmd_valid/cmd_ready`、`act_valid/act_ready`、`weight_valid/weight_ready`、
+`res_valid/res_ready/res_data/res_group_idx/res_chan_last/res_last` 和 `done_valid/done_status`，再展开内部流水级。
 
 ### MNIST MLP / CNN
 
@@ -110,6 +161,37 @@ make ACCE=soft test
 检查三种模型的独立 Python 参考结果、两类任务（分类评测、生成/验证集评测）、
 动态序列、输入校验、资源回收、统计和多句柄隔离。
 无需 PyTorch、真实模型、网络或训练；这类回归不能替代真实数据集的精度测试。
+`make ACCE=verilator test` 通过相同引擎/CLI 测试验证 RTL 接入。
+`make ACCE=verilator test-accelerator` 另行比较 soft 与 RTL 后端的整数及 FP32 输出字节，
+覆盖三种操作、步长和非对齐偏移、padding 保持、输入校验、资源归属、多设备隔离、桥接超时后恢复及宿主 Verilator 上下文保持。
+RTL 逐周期随机反压与中止测试仍由 `make -C bnn-hw/bnn_core_test test` 独立运行。
+
+若要只运行某种模型，可以保留合成测试数据后直接调用 CLI，无需训练或下载：
+
+```sh
+make ACCE=verilator -j2
+python3 tests/test_mlp.py --fixtures-only build/verilator-fixtures
+
+# MLP：8 张合成图像及 Python reference
+./bnn-infer --profile --ref build/verilator-fixtures/ref.bin \
+    build/verilator-fixtures/mnist.bnn \
+    build/verilator-fixtures/images.idx build/verilator-fixtures/labels.idx
+
+# CNN：2 张合成图像及 Python reference
+./bnn-infer --profile --ref build/verilator-fixtures/cnn-ref.bin \
+    build/verilator-fixtures/cnn.bnn \
+    build/verilator-fixtures/cnn-images.idx build/verilator-fixtures/cnn-labels.idx
+
+# GPT：logits 校验和 next-token 评测
+./bnn-infer --profile --ref build/verilator-fixtures/gpt-logits.bin build/verilator-fixtures/gpt.bnn
+./bnn-infer --profile --eval build/verilator-fixtures/gpt-eval.bin build/verilator-fixtures/gpt.bnn
+
+# 核心 RTL：固定随机种子及任务数，日志位于 build/bnn-core-test/
+make -C bnn-hw/bnn_core_test test SEEDS=7 RANDOM_CASES=32
+```
+
+MLP 合成标签故意放入两个错误类别，正常结果是 6/8；这里应以 reference 校验通过判断数值正确性。
+对上述任一 `./bnn-infer` 命令加上 `BNN_RTL_TRACE_DIR=已有目录` 前缀即可记录该模型的波形。
 
 `--profile` 分别报告加载、校验、评测、生成的耗时；推理内部细分量化、传输、设备执行和其余主机工作，
 并统计设备调用数、传输字节及有效/补齐后 MAC。MAC 仅计卸载的矩阵运算。

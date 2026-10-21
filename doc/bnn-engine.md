@@ -12,12 +12,14 @@ make ACCE=soft
 make ACCE=soft test
 ```
 
-产物是 `bnn-infer` 与 `build/soft/libbnn-engine.a`。静态库已包含所选 accelerator，
-嵌入程序只需包含公共头文件并链接此库和 `-lm`。
-目前只提供 `ACCE=soft`，其他值明确报错。构建要求 C99、IEEE-754 binary32、POSIX 单调时钟，
-禁用 fast-math 和 FMA 收缩以遵守 accelerator 数值契约。
+产物是 `bnn-infer` 与 `build/<ACCE>/libbnn-engine.a`。静态库已包含所选 accelerator。
+`ACCE=soft` 的嵌入程序使用 C 编译器链接此库和 `-lm`。
+`ACCE=verilator` 另需 Verilator 和 C++17 编译器，将整数点积交给 RTL 仿真，浮点后处理仍在 C 中执行。
+该静态库还包含桥接层、生成模型和 Verilator 运行库对象；嵌入程序的 C 源先按 C 编译，
+再用 C++ 链接器链接归档和 `-lm -pthread -latomic`，无须直接访问生成头文件。
+两种后端均要求 IEEE-754 binary32、POSIX 单调时钟，并禁用 fast-math 和 FMA 收缩。
 
-所有模型的二值矩阵运算统一通过 `bnn-accelerator.h`，`ACCE=soft` 使用设备的软件模拟实现。
+所有模型的二值矩阵运算统一通过 `bnn-accelerator.h`，在构建时通过 `ACCE=soft` 或 `ACCE=verilator` 选择后端。
 新引擎不再提供独立参考内核、backend 选择或运行参数 `--soft`。
 正确性由 Python 导出的 logits 校验；FP32 的池化、归一化、softmax、残差等必要主机运算仍保留。
 
