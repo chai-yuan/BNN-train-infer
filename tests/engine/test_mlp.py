@@ -2,7 +2,9 @@
 """Offline MLP/CNN/GPT regression using only the Python standard library.
 
 Run from any directory:
-    python3 tests/test_mlp.py --binary ./bnn-infer --library build/soft/libbnn-engine.a
+    python3 tests/engine/test_mlp.py --binary ./bnn-infer --library build/soft/libbnn-engine.a
+or through the category Makefile:
+    make -C tests/engine test
 
 All generated models, IDX data, references and executables live in a temporary
 folder. --sanitize builds the API runner with ASan/UBSan; build the engine
@@ -21,7 +23,8 @@ import struct
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[1]
+TEST_DIR = Path(__file__).resolve().parent
+ROOT = TEST_DIR.parents[1]
 
 
 def f32(value):
@@ -624,7 +627,7 @@ def main():
         correct, count, bad_count, generated, gpt, eval_ids = generate(folder)
         runner = folder / "test-bnn-engine"
         runner_object = folder / "test-bnn-engine.o"
-        run([*compiler, *flags, "-I", ROOT / "bnn-sw", "-c", ROOT / "tests/test_bnn_engine.c",
+        run([*compiler, *flags, "-I", ROOT / "bnn-sw", "-c", TEST_DIR / "test_bnn_engine.c",
              "-o", runner_object], env)
         driver_flags = [flag for flag in flags if not flag.startswith("-std=")]
         run([*shlex.split(args.linker or args.cc), *driver_flags, runner_object, library, *link_flags,

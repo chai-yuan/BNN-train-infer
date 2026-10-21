@@ -802,7 +802,7 @@ BNN_DeviceClose(engine-&gt;device)</code></pre>
     <article class="card">
       <div class="card-num">TEST</div>
       <h3>同一个测试对象</h3>
-      <p>差分测试把 <code>tests/test_bnn_accelerator.c</code> 只编译一次，然后分别链接软件实现和 Verilator 归档。同一份 C 调用方代码、同一组断言，最后比较两边的输出字节。</p>
+      <p>差分测试把 <code>tests/accelerator/test_bnn_accelerator.c</code> 只编译一次，然后分别链接软件实现和 Verilator 归档。同一份 C 调用方代码、同一组断言，最后比较两边的输出字节。</p>
     </article>
   </div>
 </section>
@@ -1559,7 +1559,7 @@ public:
   <div class="diff-diagram">
     <div class="diff-col">
       <div class="diff-node head">同一个测试对象</div>
-      <div class="diff-node"><code>tests/test_bnn_accelerator.c</code><br>只 include 公共头文件</div>
+      <div class="diff-node"><code>tests/accelerator/test_bnn_accelerator.c</code><br>只 include 公共头文件</div>
       <div class="diff-node">C99 编译一次 → <code>test_bnn_accelerator.o</code></div>
     </div>
     <div class="diff-arrow" aria-hidden="true">→</div>
@@ -1590,24 +1590,24 @@ public:
   <div class="grid-2" style="align-items:start">
     <div class="codeblock">
       <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">终端 · 差分与引擎级测试</span><span class="lang">Shell</span></div>
-<pre><code><span class="c-com"># 构建两种后端</span>
-make ACCE=soft -j2
-make ACCE=verilator -j2
+<pre><code><span class="c-com"># 引擎 / CLI 回归（Makefile 自动构建所选后端）</span>
+make -C tests/engine test
+make -C tests/engine ACCE=verilator test
 
-<span class="c-com"># 公共 API 差分 + 桥接 + context 测试</span>
-make ACCE=verilator test-accelerator
+<span class="c-com"># Llama 端到端</span>
+make -C tests/llama test
 
-<span class="c-com"># 用同一套引擎/CLI 测试跑 Verilator 后端</span>
-make ACCE=verilator test
+<span class="c-com"># 公共 API 差分 + 桥接 + context（固定构建 verilator）</span>
+make -C tests/accelerator test
 
 <span class="c-com"># 只跑波形专项检查（临时目录，自动清理）</span>
-make ACCE=verilator test-trace</code></pre>
+make -C tests/trace test</code></pre>
     </div>
     <div>
       <h3>这些测试分别在证明什么</h3>
-      <p><code>test-accelerator</code> 编译同一个 C 测试对象两次链接，比较输出字节；同时单独编译桥接测试和 context 测试。它不调用 make，也不修改根目录的 <code>bnn-infer</code>。</p>
-      <p><code>test</code> 复用原有引擎与 CLI 回归（MLP/CNN/GPT/Llama 的合成模型），验证整条推理链路在 RTL 后端下仍能通过 Python reference。</p>
-      <p><code>test-trace</code> 检查波形开关、错误目录、任务后 flush、文件名避重和多设备隔离。</p>
+      <p><code>make -C tests/accelerator test</code> 会先构建 verilator 归档，再由脚本编译同一个 C 测试对象两次链接，比较输出字节；同时单独编译桥接测试和 context 测试。Python 脚本本身不调用 make，也不修改根目录的 <code>bnn-infer</code>。</p>
+      <p><code>make -C tests/engine test</code> 复用原有引擎与 CLI 回归（MLP/CNN/GPT 的合成模型）；Llama 的合成模型与 KV Cache 一致性由 <code>make -C tests/llama test</code> 覆盖。</p>
+      <p><code>make -C tests/trace test</code> 检查波形开关、错误目录、任务后 flush、文件名避重和多设备隔离。</p>
     </div>
   </div>
 
@@ -1617,7 +1617,7 @@ make ACCE=verilator test-trace</code></pre>
 
   <div class="codeblock">
     <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">终端 · 生成一份小波形</span><span class="lang">Shell</span></div>
-<pre><code>python3 tests/test_verilator_trace.py --output-dir build/waves
+<pre><code>make -C tests/trace waves
 <span class="c-com"># 脚本会打印实际 VCD 路径，例如：</span>
 <span class="c-com"># build/waves/bnn-core-XXXXXX.vcd</span>
 gtkwave build/waves/bnn-core-XXXXXX.vcd</code></pre>
@@ -1706,7 +1706,7 @@ gtkwave build/waves/bnn-core-XXXXXX.vcd</code></pre>
         <li>bnn-accelerator/verilator-bnn-accelerator.c</li>
         <li>bnn-accelerator/verilator-bnn-bridge.{h,cpp}</li>
         <li>bnn-hw/bnn_core/*.sv · bnn-hw/README.md</li>
-        <li>Makefile · tests/test_accelerator.py · tests/test_verilator_*.cpp</li>
+        <li>Makefile · tests/accelerator/test_accelerator.py · tests/accelerator/test_verilator_*.cpp</li>
       </ul>
     </div>
     <div>

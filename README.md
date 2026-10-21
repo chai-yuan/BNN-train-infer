@@ -26,7 +26,7 @@ train-*-export.py       Python 训练、模型导出和参考数据生成
 bnn-infer.c            统一演示入口：分类与文本生成两类任务，附校验与统计
 bnn-sw/                BNNE 引擎、模型加载、工作区和前向实现
 bnn-accelerator/       设备级公共接口、soft/Verilator 后端及 C ABI 仿真桥接
-tests/                 离线回归测试（无需训练或下载数据）
+tests/                 分类回归测试（engine / llama / accelerator / trace）
 doc/                   引擎接口及 BNN1、GPT1 文件格式说明
 bnn-hw/                SystemVerilog 计算核心、核心自检测试及接口说明
 ```
@@ -47,8 +47,9 @@ make ACCE=soft
 
 ```bash
 make ACCE=verilator -j2
-make ACCE=verilator test-accelerator
-make ACCE=verilator test
+make -C tests/accelerator test
+make -C tests/engine ACCE=verilator test
+make -C tests/llama ACCE=verilator test
 ```
 
 该后端另需 Verilator（本地验证版本 5.032）和 C++17 编译器，产物为 `build/verilator/libbnn-engine.a`。
@@ -74,15 +75,15 @@ DOT_GROUPS 的整数结果直接来自 RTL，GEMV/GEMM 的 scale 和 FP32 组间
 先用很小的计算任务生成波形：
 
 ```sh
-make ACCE=verilator -j2
-python3 tests/test_verilator_trace.py --output-dir build/waves
+make -C tests/trace waves
 # 脚本会打印两个实际 VCD 路径，任选一个打开：
 # gtkwave build/waves/bnn-core-XXXXXX.vcd
 ```
 
 该测试使用 K=128、N=2、G=128、全 1 激活，两个通道分别全正/全负权重，DOT 结果应为 `[128, -128]`。
 测试会检查关闭开关、错误目录、实时刷新、文件避重及两个设备隔离。
-`make ACCE=verilator test-trace` 执行相同检查，但波形存放在临时目录并自动清理。
+`make -C tests/trace test` 执行相同检查，但波形存放在临时目录并自动清理。
+加速器差分测试也可以导出波形：`make -C tests/accelerator waves`，默认输出到 `build/waves/accelerator`。
 
 给任意推理命令启用波形：
 
@@ -154,15 +155,24 @@ MLP/CNN 脚本都写入当前目录的 `ref_logits.bin`，应及时另存以免�
 ## 测试与性能统计
 
 ```bash
-make ACCE=soft test
+make -C tests/engine test
+make -C tests/engine ACCE=verilator test
+make -C tests/llama test
+make -C tests/accelerator test
+make -C tests/trace test
 ```
 
-测试仅依赖 Python 3 标准库和 C 构建工具，会在临时目录生成模型与数据，
-检查三种模型的独立 Python 参考结果、两类任务（分类评测、生成/验证集评测）、
-动态序列、输入校验、资源回收、统计和多句柄隔离。
-无需 PyTorch、真实模型、网络或训练；这类回归不能替代真实数据集的精度测试。
-`make ACCE=verilator test` 通过相同引擎/CLI 测试验证 RTL 接入。
-`make ACCE=verilator test-accelerator` 另行比较 soft 与 RTL 后端的整数及 FP32 输出字节，
+`tests/` 按类别拆分：`engine/` 覆盖 MLP/CNN/GPT、引擎 API 与 CLI；`llama/` 覆盖 Llama 导出、评测、生成和 KV Cache；
+`accelerator/` 覆盖加速器 API、软/硬件差分、桥接与宿主 context；`trace/` 覆盖可选的 VCD 波形。
+engine/llama 的 Makefile 会先构建所选后端；accelerator/trace 固定构建 `ACCE=verilator`。
+每个分类目录的 `README.md` 说明了测试内容、依赖、覆盖范围和选项。
+
+测试会在临时目录生成模型与数据，检查三种模型的独立 Python 参考结果、两类任务（分类评测、生成/验证集评测）、
+动态序列、输入校验、资源回收、统计和多句柄隔离。engine 测试仅依赖 Python 3 标准库和 C 构建工具；
+llama 测试还需要导出器所需依赖（可用 `PYTHON=/absolute/path/to/.venv/bin/python3` 指定虚拟环境）。
+这类回归不能替代真实数据集的精度测试。
+`make -C tests/engine ACCE=verilator test` 通过相同引擎/CLI 测试验证 RTL 接入。
+`make -C tests/accelerator test` 另行比较 soft 与 RTL 后端的整数及 FP32 输出字节，
 覆盖三种操作、步长和非对齐偏移、padding 保持、输入校验、资源归属、多设备隔离、桥接超时后恢复及宿主 Verilator 上下文保持。
 RTL 逐周期随机反压与中止测试仍由 `make -C bnn-hw/bnn_core_test test` 独立运行。
 
@@ -170,7 +180,7 @@ RTL 逐周期随机反压与中止测试仍由 `make -C bnn-hw/bnn_core_test tes
 
 ```sh
 make ACCE=verilator -j2
-python3 tests/test_mlp.py --fixtures-only build/verilator-fixtures
+make -C tests/engine fixtures FIXTURES=build/verilator-fixtures
 
 # MLP：8 张合成图像及 Python reference
 ./bnn-infer --profile --ref build/verilator-fixtures/ref.bin \

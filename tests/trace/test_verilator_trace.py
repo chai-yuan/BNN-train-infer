@@ -3,7 +3,9 @@
 
 Build the normal ACCE=verilator archive first (trace support is always built in).
 Run from the repository root to leave inspectable waveforms:
-    python3 tests/test_verilator_trace.py --output-dir build/waves
+    python3 tests/trace/test_verilator_trace.py --output-dir build/waves
+or through the category Makefile:
+    make -C tests/trace waves
 
 Optional: --library build/verilator/libbnn-engine.a --cc cc --cxx c++
 Compiler commands may include wrappers, e.g. --cc 'ccache gcc'. Compilation and
@@ -26,7 +28,8 @@ import tempfile
 import threading
 
 
-ROOT = Path(__file__).resolve().parent.parent
+TEST_DIR = Path(__file__).resolve().parent
+ROOT = TEST_DIR.parents[1]
 TRACE_ENV = "BNN_RTL_TRACE_DIR"
 CHECKPOINTS = (
     "opened", "first-dot", "second-dot", "first-gemv", "second-gemv",
@@ -308,7 +311,7 @@ def main():
         runner = work / "trace-runner"
         run([*args.cc, "-std=c99", "-O2", "-Wall", "-Wextra", "-Wpedantic",
              "-fno-fast-math", "-ffp-contract=off", "-I", ROOT / "bnn-accelerator",
-             "-c", ROOT / "tests/test_verilator_trace.c", "-o", obj], cwd=work)
+             "-c", TEST_DIR / "test_verilator_trace.c", "-o", obj], cwd=work)
         run([*args.cxx, obj, library, "-pthread", "-latomic", "-lm", "-o", runner], cwd=work)
         for label, value in (("unset", None), ("empty", "")):
             sandbox = work / label

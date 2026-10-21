@@ -9,7 +9,7 @@
 
 ```sh
 make ACCE=soft
-make ACCE=soft test
+make -C tests/engine test
 ```
 
 产物是 `bnn-infer` 与 `build/<ACCE>/libbnn-engine.a`。静态库已包含所选 accelerator。
@@ -129,6 +129,8 @@ GPT 仍要求 head size 等于模型/设备 group。设备维度和 rows 超限�
 check、eval、generate 分阶段重置统计，不混合累计。软件设备的传输是内存复制与接口开销，
 不能直接等同真实 DMA 性能。CNN 补齐后的执行 MAC 会显著高于有效 MAC。
 
-`make test` 使用 Python 标准库生成临时模型、IDX、tokens 与 reference，检查迁移数值、
+`make -C tests/engine test` 使用 Python 标准库生成临时模型、IDX、tokens 与 reference，检查迁移数值、
 多模型句柄隔离、动态序列、错误加载/输入和统计。测试不下载数据、不依赖训练，
 真实数据精度仍需使用各自训练脚本导出的模型与数据评估。
+Llama 的端到端验证由 `make -C tests/llama test` 提供；加速器差分和波形测试分别位于
+`tests/accelerator/` 与 `tests/trace/`。

@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Test Llama-2 W1A8 end-to-end: export -> bnn-infer -> C vs Python reference check."""
+"""Test Llama-2 W1A8 end-to-end: export -> bnn-infer -> C vs Python reference check.
+
+Run directly, or use the category Makefile:
+    make -C tests/llama test
+"""
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 def run(cmd, **kwargs):
     print(f"+ {' '.join(cmd)}")

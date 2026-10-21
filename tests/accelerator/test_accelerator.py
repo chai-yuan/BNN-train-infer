@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """Compile isolated accelerator runners against an already-built RTL archive.
 
-From any directory:
-    python3 /home/charain/project/BNN-train-infer/tests/test_accelerator.py \
-        --library /home/charain/project/BNN-train-infer/build/verilator/libbnn-engine.a \
+From the repository root:
+    python3 tests/accelerator/test_accelerator.py \
+        --library build/verilator/libbnn-engine.a \
         --cc cc --cxx c++ --verilator verilator
+or through the category Makefile:
+    make -C tests/accelerator test
+
+Add --trace-dir DIR (or set BNN_RTL_TRACE_DIR) to keep VCD waveforms from every
+Verilator runner. The directory is created if missing; one VCD is produced per
+simulated device, so the public API, bridge and context runners each add files.
+Pre-existing VCDs in the directory are left untouched.
 
 The archive must contain the backend, bridge, model and Verilator runtime objects.
 This script never invokes make or changes bnn-infer. All build products and dumps
@@ -22,7 +29,9 @@ import subprocess
 import tempfile
 
 
-ROOT = Path(__file__).resolve().parent.parent
+TEST_DIR = Path(__file__).resolve().parent
+ROOT = TEST_DIR.parents[1]
+TRACE_ENV = "BNN_RTL_TRACE_DIR"
 
 
 def command(value):
@@ -32,10 +41,22 @@ def command(value):
     return result
 
 
-def run(argv):
+def run(argv, env=None):
     argv = [str(arg) for arg in argv]
     print("+ " + shlex.join(argv), flush=True)
-    subprocess.run(argv, check=True, cwd=ROOT, timeout=300)
+    subprocess.run(argv, check=True, cwd=ROOT, timeout=300, env=env)
+
+
+def run_with_trace(label, argv, trace_dir, trace_env):
+    if trace_dir is None:
+        run(argv)
+        return set()
+    before = set(trace_dir.glob("*.vcd"))
+    run(argv, env=trace_env)
+    created = sorted(set(trace_dir.glob("*.vcd")) - before)
+    for path in created:
+        print(f"Waveform [{label}]: {path}", flush=True)
+    return set(created)
 
 
 def verilator_includes(verilator):
@@ -87,10 +108,23 @@ def main():
                         help="C++ compiler/linker command (default: CXX or c++)")
     parser.add_argument("--verilator", type=command, default=os.environ.get("VERILATOR", "verilator"),
                         help="Verilator command for runtime headers (default: VERILATOR or verilator)")
+    parser.add_argument("--trace-dir", type=Path,
+                        help="keep VCD waveforms here (created if missing); "
+                             "BNN_RTL_TRACE_DIR is honored when this option is absent")
     args = parser.parse_args()
     library = args.library.expanduser().resolve()
     if not library.is_file():
         parser.error(f"archive does not exist: {library}; build ACCE=verilator first")
+
+    trace_value = args.trace_dir if args.trace_dir is not None else os.environ.get(TRACE_ENV, "")
+    trace_dir = None
+    trace_env = None
+    if trace_value:
+        trace_dir = Path(trace_value).expanduser().resolve()
+        trace_dir.mkdir(parents=True, exist_ok=True)
+        trace_env = os.environ.copy()
+        trace_env[TRACE_ENV] = str(trace_dir)
+        print(f"Waveform trace dir: {trace_dir}", flush=True)
 
     include = ROOT / "bnn-accelerator"
     flags = ["-O2", "-Wall", "-Wextra", "-Wpedantic",
@@ -109,19 +143,21 @@ def main():
         rtl_dump = tmp / "rtl.bin"
 
         # Compile the public API test as C once; link the same object to each backend.
-        run([*args.cc, *c_flags, "-c", ROOT / "tests/test_bnn_accelerator.c", "-o", obj])
+        run([*args.cc, *c_flags, "-c", TEST_DIR / "test_bnn_accelerator.c", "-o", obj])
         run([*args.cc, *c_flags, obj, include / "soft-bnn-accelerator.c", "-lm", "-o", soft])
         run([*args.cxx, obj, library, "-pthread", "-latomic", "-lm", "-o", rtl])
-        run([*args.cxx, *cxx_flags, ROOT / "tests/test_verilator_bridge.cpp",
+        run([*args.cxx, *cxx_flags, TEST_DIR / "test_verilator_bridge.cpp",
              library, "-pthread", "-latomic", "-lm", "-o", bridge])
-        run([*args.cxx, *cxx_flags, *context_includes, ROOT / "tests/test_verilator_context.cpp",
+        run([*args.cxx, *cxx_flags, *context_includes, TEST_DIR / "test_verilator_context.cpp",
              library, "-pthread", "-latomic", "-lm", "-o", context])
 
         run([soft, soft_dump])
-        run([rtl, rtl_dump])
+        created = run_with_trace("public API", [rtl, rtl_dump], trace_dir, trace_env)
         compare_dumps(soft_dump, rtl_dump)
-        run([bridge])
-        run([context])
+        created |= run_with_trace("bridge", [bridge], trace_dir, trace_env)
+        created |= run_with_trace("context", [context], trace_dir, trace_env)
+        if trace_dir is not None:
+            print(f"Waveforms: {len(created)} new VCD file(s) in {trace_dir}", flush=True)
     print("Accelerator differential, standalone bridge and runtime context tests passed.")
 
 

@@ -128,8 +128,8 @@ DONE 等待完成通知握手时，`status_idle` 和 `status_busy` 均为 0，`c
 记录复位、顶层和内部流水信号以及该设备上的所有计算任务；任务结束后刷新，关闭设备时完成文件。
 默认模型已编译 tracing 支持，无需为每次调试重新构建。
 时间单位为 1ps、时钟周期为 10ns，仅用于波形查看，不代表实现频率。
-可运行 `python3 tests/test_verilator_trace.py --output-dir build/waves` 生成小型 DOT/GEMV 波形，
-或运行 `make ACCE=verilator test-trace` 只进行专项检查并自动清理临时文件。
+可运行 `make -C tests/trace waves` 生成小型 DOT/GEMV 波形，
+或运行 `make -C tests/trace test` 只进行专项检查并自动清理临时文件。
 
 ## 测试
 
