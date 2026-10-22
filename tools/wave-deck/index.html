@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#e2ebe4">
+<meta name="description" content="WAVE/DECK：BNN 顶层握手流观测台，流式解析 Verilator VCD，只显示握手成功的数据移动。">
+<title>WAVE/DECK · BNN 顶层握手流观测台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 13 13' shape-rendering='crispEdges'%3E%3Crect width='13' height='13' fill='%23f8fbf6'/%3E%3Cpath fill='%232f7d54' d='M1 6h3v1H1zM5 3h3v7H5zM9 4h2v5H9z'/%3E%3Cpath fill='%231f2e25' d='M4 2h4v2H4zM4 10h4v1H4z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand-block">
+      <div class="brand">WAVE<span>/</span>DECK</div>
+      <div class="brand-sub">BNN 顶层握手流观测台</div>
+    </div>
+    <div class="stamp">OBSERVE · V0.1</div>
+    <div class="trace-id">
+      <div class="trace-name"><span class="led" id="linkLed"></span><span id="fileName">未载入波形</span><span class="file-size" id="fileSize"></span></div>
+      <div class="trace-sub" id="scopeName">拖入 Verilator VCD · 自动锁定 bnn_core_top</div>
+    </div>
+    <div class="top-actions">
+      <button class="btn" id="sampleBtn" type="button">载入示例</button>
+      <button class="btn primary" id="loadBtn" type="button">载入 VCD</button>
+      <input type="file" id="fileInput" accept=".vcd,text/plain" hidden>
+    </div>
+  </header>
+
+  <section class="scoreboard" aria-label="波形概览">
+    <div class="score">
+      <span class="score-label">任务 TASKS</span>
+      <b id="kpiTasks">--</b>
+      <span class="score-sub" id="kpiTasksSub">等待波形</span>
+    </div>
+    <div class="score">
+      <span class="score-label">成功 SUCCESS</span>
+      <b id="kpiSuccess">--</b>
+      <span class="score-sub" id="kpiSuccessSub">--</span>
+    </div>
+    <div class="score">
+      <span class="score-label">周期 CYCLES</span>
+      <b id="kpiCycles">--</b>
+      <span class="score-sub" id="kpiCyclesSub">--</span>
+    </div>
+    <div class="score">
+      <span class="score-label">输入握手 INPUT</span>
+      <b id="kpiIn">--</b>
+      <span class="score-sub" id="kpiInSub">--</span>
+    </div>
+    <div class="score">
+      <span class="score-label">结果握手 RESULT</span>
+      <b id="kpiRes">--</b>
+      <span class="score-sub" id="kpiResSub">--</span>
+    </div>
+    <div class="score">
+      <span class="score-label">忙碌占比 BUSY</span>
+      <b id="kpiBusy">--</b>
+      <span class="score-sub" id="kpiBusySub">--</span>
+    </div>
+  </section>
+
+  <main class="workspace">
+    <aside class="panel tasks-panel">
+      <div class="panel-head">
+        <div class="nameplate"><span class="zh">任务</span><span class="en">COMMANDS</span></div>
+        <span class="counter" id="taskCount">0</span>
+      </div>
+      <div class="task-list" id="taskList"></div>
+      <div class="panel-foot">命令握手切分 · 点击聚焦任务</div>
+    </aside>
+
+    <section class="panel flow-panel">
+      <div class="panel-head">
+        <div class="nameplate"><span class="zh">数据流</span><span class="en">HANDSHAKE FLOW</span></div>
+        <div class="head-right">
+          <span class="focus-chip" id="flowFocus">全部任务</span>
+          <span class="cycle-tag" id="flowCycles">CYCLE --</span>
+        </div>
+      </div>
+      <div class="canvas-wrap"><canvas id="flowCanvas" aria-label="顶层握手数据流图"></canvas></div>
+    </section>
+
+    <aside class="panel inspect-panel">
+      <div class="panel-head">
+        <div class="nameplate"><span class="zh">检视</span><span class="en">INSPECT</span></div>
+        <div class="tabs" role="tablist">
+          <button class="tab active" id="tabEvents" type="button" role="tab" aria-selected="true">握手</button>
+          <button class="tab" id="tabStats" type="button" role="tab" aria-selected="false">统计</button>
+        </div>
+      </div>
+      <div class="inspect-body">
+        <div class="pane events-pane" id="eventsPane">
+          <div class="event-tools">
+            <div class="filter-row" id="eventFilters">
+              <button class="filter active" data-filter="all" type="button">ALL</button>
+              <button class="filter" data-filter="cmd" type="button">CMD</button>
+              <button class="filter" data-filter="in" type="button">IN</button>
+              <button class="filter" data-filter="res" type="button">RES</button>
+              <button class="filter" data-filter="done" type="button">DONE</button>
+            </div>
+            <button class="mini-btn" id="followBtn" type="button" title="播放时自动滚动事件列表">跟随 ON</button>
+          </div>
+          <div class="event-scroll" id="eventScroll">
+            <div class="event-spacer" id="eventSpacer"></div>
+            <div class="event-rows" id="eventRows"></div>
+          </div>
+          <div class="event-count" id="eventCount">0 EVENTS</div>
+        </div>
+        <div class="pane stats-pane" id="statsPane" hidden></div>
+        <div class="detail-panel">
+          <div class="detail-head"><span>握手检视 / HANDSHAKE</span><span id="detailCycle">--</span></div>
+          <div class="detail-body" id="detailBody">
+            <div class="detail-empty">尚未选择握手事件</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <section class="panel timeline-panel">
+      <div class="panel-head timeline-head">
+        <div class="nameplate"><span class="zh">时间线</span><span class="en">DENSITY</span></div>
+        <div class="transport">
+          <button class="mini-btn" id="startBtn" type="button" title="跳到首个握手">|&lt;</button>
+          <button class="mini-btn" id="prevBtn" type="button" title="上一个握手 (←)">EV &lt;</button>
+          <button class="mini-btn play" id="playBtn" type="button" title="播放 / 暂停 (空格)">PLAY</button>
+          <button class="mini-btn" id="nextBtn" type="button" title="下一个握手 (→)">EV &gt;</button>
+          <button class="mini-btn" id="endBtn" type="button" title="跳到末个握手">&gt;|</button>
+          <button class="mini-btn" id="speedBtn" type="button" title="播放速度">1×</button>
+          <button class="mini-btn" id="fitBtn" type="button" title="适应当前任务或全波形">FIT</button>
+          <span class="cycle-readout" id="cycleReadout">CYCLE --</span>
+        </div>
+      </div>
+      <div class="canvas-wrap timeline-wrap"><canvas id="timelineCanvas" aria-label="握手密度时间线"></canvas></div>
+    </section>
+  </main>
+
+  <footer class="statusbar">
+    <span id="statusText">等待波形</span>
+    <span class="hint">拖入 VCD · 空格播放 · ←/→ 步进握手 · 时间线滚轮缩放</span>
+    <span id="clockInfo">--</span>
+  </footer>
+</div>
+
+<div id="emptyState" class="overlay welcome">
+  <div class="welcome-card">
+    <div class="welcome-kicker">TOP-LEVEL TRANSACTION VIEW</div>
+    <div class="welcome-brand">WAVE<span>/</span>DECK</div>
+    <div class="welcome-sub">BNN 顶层握手流观测台 <em>//</em> HANDSHAKE OBSERVATORY</div>
+    <div class="welcome-art" aria-hidden="true">
+      <div class="art-lane"><span>CMD</span><i style="--delay:0s"></i><i style="--delay:2.1s"></i></div>
+      <div class="art-lane"><span>ACT/WGT</span><i style="--delay:0.7s"></i><i style="--delay:2.8s"></i></div>
+      <div class="art-lane"><span>RES/DONE</span><i style="--delay:1.4s"></i><i style="--delay:3.5s"></i></div>
+      <div class="art-core">CORE</div>
+    </div>
+    <div class="welcome-drop">拖入 <b>.vcd</b> 波形文件</div>
+    <div class="welcome-actions">
+      <button class="btn primary" id="welcomeLoad" type="button">载入 VCD</button>
+      <button class="btn" id="welcomeSample" type="button">载入示例</button>
+    </div>
+    <ul class="welcome-features">
+      <li>流式扫描大文件，只保留 <b>bnn_core_top</b> 顶层端口</li>
+      <li>以握手成功为粒度还原 <b>CMD / ACT+WGT / RES / DONE</b></li>
+      <li>不绘制逐周期波形，任务、密度时间线和性能摘要联动</li>
+    </ul>
+    <div class="welcome-foot">VCD · VERILATOR TRACE · LOCAL ONLY</div>
+  </div>
+</div>
+
+<div id="dropOverlay" class="overlay drop hidden">
+  <div class="drop-card">
+    <div class="drop-icon">VCD</div>
+    <div class="drop-title">释放文件以接驳观测台</div>
+    <div class="drop-sub">只读取顶层握手 · 文件不会离开本机</div>
+  </div>
+</div>
+
+<div id="loadOverlay" class="overlay load hidden">
+  <div class="boot-inner">
+    <div class="boot-brand">WAVE<span>/</span>DECK</div>
+    <div class="boot-sub" id="loadSub">正在接驳 VCD</div>
+    <div class="load-file" id="loadFile">--</div>
+    <div class="boot-bar"><i id="loadBar"></i></div>
+    <div class="load-row"><span id="loadPct">0%</span><span id="loadTip">扫描头部...</span></div>
+  </div>
+</div>
+
+<div id="boot" class="overlay boot">
+  <div class="boot-inner">
+    <div class="boot-brand">WAVE<span>/</span>DECK</div>
+    <div class="boot-sub">BNN 顶层握手流观测台</div>
+    <div class="boot-bar"><i></i></div>
+    <div class="boot-tip">正在接驳观测链路</div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="js/gfx.js"></script>
+<script src="js/vcd.js"></script>
+<script src="js/analyze.js"></script>
+<script src="js/flow.js"></script>
+<script src="js/timeline.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
