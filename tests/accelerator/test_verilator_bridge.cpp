@@ -75,6 +75,24 @@ int main() {
     OK(bnn_rtl_create(&first)); CHECK(first != nullptr);
     OK(bnn_rtl_create(&second)); CHECK(second != nullptr && second != first);
 
+    /* One command, one input, four pipeline/drain cycles: no extra completion cycle. */
+    int32_t single_expected = 0;
+    for (uint32_t k = 0; k < 32; ++k) {
+        const int32_t sign = (wa[k / 8] & (1u << (k % 8))) ? 1 : -1;
+        single_expected += static_cast<int32_t>(a[k]) * sign;
+    }
+    std::array<int32_t, 3> single;
+    single.fill(INT32_C(0x13579bdf));
+    STATUS(bnn_rtl_dot_groups(first, a.data(), wa.data(), 32, 1, 32,
+                              single.data() + 1, 5), BNN_ETIMEOUT);
+    CHECK(single[1] == INT32_C(0x13579bdf));
+    for (unsigned i = 0; i < 3; ++i) {
+        OK(bnn_rtl_dot_groups(first, a.data(), wa.data(), 32, 1, 32,
+                              single.data() + 1, 6));
+        CHECK(single[0] == INT32_C(0x13579bdf) && single[2] == INT32_C(0x13579bdf));
+        CHECK(single[1] == single_expected);
+    }
+
     /* A one-cycle job must time out; the same instance then runs normally. */
     STATUS(bnn_rtl_dot_groups(first, a.data(), wa.data(), K, N, G, oa.data(), 1), BNN_ETIMEOUT);
     run(first, a, wa, oa);

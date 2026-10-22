@@ -86,19 +86,14 @@ struct bnn_rtl_sim {
     void reset() {
         core->clock = 0;
         core->reset = 1;
-        core->ctrl_abort = 0;
         core->cmd_valid = 0;
         core->cmd_k_blocks = 0;
         core->cmd_group_div = 0;
         core->cmd_out_chans = 0;
-        core->act_valid = 0;
-        core->weight_valid = 0;
-        core->act_last = 0;
-        core->weight_last = 0;
+        core->in_valid = 0;
         core->weight_data = 0;
         for (unsigned i = 0; i < 8; ++i) core->act_data[i] = 0;
         core->res_ready = 0;
-        core->done_ready = 0;
         core->eval();
         tick();
         tick();
@@ -161,8 +156,8 @@ extern "C" BNN_Status bnn_rtl_dot_groups(BNN_RtlSim* sim, const int8_t* input,
     if (uint64_t(out_features) * (in_features / 8) > SIZE_MAX ||
         result_count > SIZE_MAX / sizeof(int32_t))
         return BNN_ERANGE;
-    // With both sources valid and the sink ready, one input beat fits per clock.
-    // Leave room for command, pipeline drain, completion and future small changes.
+    // With a valid operand pair and the sink ready, one input beat fits per clock.
+    // Leave room for command, pipeline drain and future small changes.
     if (max_cycles == 0) max_cycles = input_beats + result_count + 64;
 
     ContextScope scope(&sim->context);
@@ -175,13 +170,11 @@ extern "C" BNN_Status bnn_rtl_dot_groups(BNN_RtlSim* sim, const int8_t* input,
         core.cmd_group_div = group_size / 32;
         core.cmd_out_chans = out_features;
         core.res_ready = 1;
-        core.done_ready = 1;
 
         for (uint64_t cycle = 0; cycle < max_cycles; ++cycle) {
             core.cmd_valid = !accepted;
-            core.act_valid = accepted && sent < input_beats;
-            core.weight_valid = core.act_valid;
-            if (core.act_valid) {
+            core.in_valid = accepted && sent < input_beats;
+            if (core.in_valid) {
                 const size_t block = size_t(sent % blocks);
                 const size_t channel = size_t(sent / blocks);
                 const size_t offset = block * 32;
@@ -196,16 +189,14 @@ extern "C" BNN_Status bnn_rtl_dot_groups(BNN_RtlSim* sim, const int8_t* input,
                 for (unsigned byte = 0; byte < 4; ++byte)
                     packed |= uint32_t(weights[weight_offset + byte]) << (byte * 8);
                 core.weight_data = packed;
-                core.act_last = block == blocks - 1;
-                core.weight_last = core.act_last;
             }
             core.eval();
             if (sim->context.gotFinish()) return recover(sim, BNN_EIO);
             const bool cmd_fire = core.cmd_valid && core.cmd_ready;
-            const bool act_fire = core.act_valid && core.act_ready;
-            const bool weight_fire = core.weight_valid && core.weight_ready;
-            if (act_fire != weight_fire) return recover(sim, BNN_EIO);
-            if (core.res_valid && core.res_ready) {
+            const bool in_fire = core.in_valid && core.in_ready;
+            const bool res_fire = core.res_valid && core.res_ready;
+            const bool task_complete = res_fire && core.res_last;
+            if (res_fire) {
                 if (received >= result_count || core.res_group_idx != received % groups ||
                     bool(core.res_chan_last) != (received % groups == groups - 1) ||
                     bool(core.res_last) != (received == result_count - 1))
@@ -214,18 +205,14 @@ extern "C" BNN_Status bnn_rtl_dot_groups(BNN_RtlSim* sim, const int8_t* input,
                 std::memcpy(output + size_t(received), &bits, sizeof bits);
                 ++received;
             }
-            const bool done = core.done_valid && core.done_ready;
-            const unsigned status = core.done_status;
             if (cmd_fire) accepted = true;
-            if (act_fire) ++sent;
+            if (in_fire) ++sent;
             sim->tick();
-            if (done) {
-                if (status != 0 || !accepted || sent != input_beats || received != result_count)
+            if (task_complete) {
+                if (!accepted || sent != input_beats || received != result_count || !core.cmd_ready)
                     return recover(sim, BNN_EIO);
                 core.cmd_valid = 0;
-                core.act_valid = 0;
-                core.weight_valid = 0;
-                core.done_ready = 0;
+                core.in_valid = 0;
                 core.eval();
                 sim->flush_trace();
                 return BNN_OK;

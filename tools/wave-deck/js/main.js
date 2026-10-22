@@ -8,7 +8,7 @@
   const $ = (id) => document.getElementById(id);
   const ROW_H = 26;
   const SPEEDS = [0.5, 1, 2, 4];
-  const TYPE_LABEL = { cmd: 'CMD', in: 'IN', res: 'RES', done: 'DONE' };
+  const TYPE_LABEL = { cmd: 'CMD', in: 'IN', res: 'RES', done: 'END' };
   const TYPE_CLASS = { cmd: 'ev-cmd', in: 'ev-in', res: 'ev-res', done: 'ev-done' };
   const STATUS_SHORT = {
     ok: 'OK', cfg: 'CFG', aborted: 'ABRT', protocol: 'PROTO',
@@ -118,9 +118,9 @@
     $('kpiCycles').textContent = String(s.edges);
     $('kpiCyclesSub').textContent = formatSeconds(s.traceSeconds);
     $('kpiIn').textContent = String(s.inEvents);
-    $('kpiInSub').textContent = `ACT ${s.actHandshakes} · WGT ${s.weightHandshakes}`;
+    $('kpiInSub').textContent = `${s.inHandshakes} 次配对握手`;
     $('kpiRes').textContent = String(s.resEvents);
-    $('kpiResSub').textContent = `DONE ${s.doneEvents}`;
+    $('kpiResSub').textContent = `末 RES 完成 ${s.doneEvents}`;
     $('kpiBusy').textContent = Math.round(s.busyRatio * 100) + '%';
     $('kpiBusySub').textContent = `${s.busyCycles}/${s.nonResetCycles} 周期`;
 
@@ -146,20 +146,20 @@
     if (!ev) return '';
     if (ev.type === 'cmd') return `K ${fmt(ev.k)} · G ${fmt(ev.groups)} · N ${fmt(ev.n)}`;
     if (ev.type === 'in') {
-      return `CH${fmt(ev.channel)} · ${fmt(ev.beat === null ? null : ev.beat + 1)}/${fmt(ev.beatsPerChannel)} · A${ev.actLast ? 'L' : '-'} W${ev.weightLast ? 'L' : '-'}`;
+      return `CH${fmt(ev.channel)} · ${fmt(ev.beat === null ? null : ev.beat + 1)}/${fmt(ev.beatsPerChannel)} · ${ev.channelLast ? '通道末拍（计数推导）' : '配对输入'}`;
     }
     if (ev.type === 'res') {
       return `CH${fmt(ev.channel)} · G${fmt(ev.group)} · ${fmt(ev.data)}${ev.chanLast ? ' · CL' : ''}${ev.last ? ' · LAST' : ''}`;
     }
-    return `${ev.statusText || 'DONE'} · ${fmt(ev.status)}`;
+    return '末 RES 握手 · 任务结束';
   }
 
   function eventRowSummary(ev) {
     if (!ev) return '';
     if (ev.type === 'cmd') return `K=${fmt(ev.k)} G=${fmt(ev.groups)} N=${fmt(ev.n)}`;
-    if (ev.type === 'in') return `CH${fmt(ev.channel)} beat ${fmt(ev.beat === null ? null : ev.beat + 1)}/${fmt(ev.beatsPerChannel)}  A${ev.actLast ? 'L' : '-'} W${ev.weightLast ? 'L' : '-'}`;
+    if (ev.type === 'in') return `CH${fmt(ev.channel)} beat ${fmt(ev.beat === null ? null : ev.beat + 1)}/${fmt(ev.beatsPerChannel)}  ${ev.channelLast ? '通道末拍（计数推导）' : '配对输入'}`;
     if (ev.type === 'res') return `CH${fmt(ev.channel)} G${fmt(ev.group)} = ${fmt(ev.data)}${ev.chanLast ? '  chan_last' : ''}${ev.last ? '  last' : ''}`;
-    return `status ${fmt(ev.status)} · ${ev.statusText || ''}`;
+    return 'res_last 握手 · 任务结束';
   }
 
   function focusTaskAt(cycle) {
@@ -609,14 +609,14 @@
       statRow('非复位周期', String(s.nonResetCycles)),
       statRow('忙碌周期', `${s.busyCycles} (${Math.round(s.busyRatio * 100)}%)`),
       statRow('任务总数', String(s.tasks)),
-      statRow('成功 / 异常', `${s.ok} / ${s.tasks - s.ok}`),
+      statRow('成功 / 复位取消', `${s.ok} / ${s.canceled}`),
       statRow('CMD 握手', String(s.cmdEvents)),
-      statRow('输入握手', `${s.inEvents} (A${s.actHandshakes}/W${s.weightHandshakes})`),
+      statRow('配对输入握手', String(s.inHandshakes)),
       statRow('结果握手', String(s.resEvents)),
-      statRow('完成握手', String(s.doneEvents)),
+      statRow('末 RES 完成', String(s.doneEvents)),
       statRow('CMD 停顿', String(s.stalls.cmd)),
-      statRow('ACT/WGT 停顿', `${s.stalls.act}/${s.stalls.weight}`),
-      statRow('RES/DONE 停顿', `${s.stalls.res}/${s.stalls.done}`)
+      statRow('IN 停顿', String(s.stalls.in)),
+      statRow('RES 停顿', String(s.stalls.res))
     );
     if (s.clockPeriodSec) grid.append(statRow('时钟周期', formatSeconds(s.clockPeriodSec)));
     if (s.traceSeconds) grid.append(statRow('波形时长', formatSeconds(s.traceSeconds)));
@@ -643,8 +643,8 @@
         statRow('结果密度', task.resDensity.toFixed(2) + ' 个/周期'),
         statRow('输入通道数', `${task.inputChannels} / ${fmt(task.n)}`),
         statRow('结果通道数', `${task.resultChannels} / ${fmt(task.n)}`),
-        statRow('忙 / 完成等待', `${task.busyCycles}c / ${task.doneWaitCycles}c`),
-        statRow('停顿 ACT/WGT/RES', `${task.stalls.act}/${task.stalls.weight}/${task.stalls.res}`)
+        statRow('忙 / 末 RES 等待', `${task.busyCycles}c / ${task.doneWaitCycles}c`),
+        statRow('停顿 IN/RES', `${task.stalls.in}/${task.stalls.res}`)
       );
       sec.append(g);
       if (task.issues.length) {
@@ -786,7 +786,7 @@
     const frag = document.createDocumentFragment();
     const head = el('div', 'ev-title-line');
     const badge = el('span', 'ev-type-badge ' + (TYPE_CLASS[ev.type] || '') + (ev.type === 'done' && ev.status !== 0 ? ' ev-err' : ''), TYPE_LABEL[ev.type] || '?');
-    const title = el('span', 'ev-title', ev.type === 'cmd' ? '命令握手' : ev.type === 'in' ? '输入握手 ACT + WGT' : ev.type === 'res' ? '结果握手' : '完成握手');
+    const title = el('span', 'ev-title', ev.type === 'cmd' ? '命令握手' : ev.type === 'in' ? '输入握手 ACT + WGT' : ev.type === 'res' ? '结果握手' : '任务结束（末 RES 推导）');
     const cyc = el('span', 'ev-time', `C${ev.cycle} · ${formatTickTime(ev.time)}`);
     head.append(badge, title, cyc);
     frag.append(head);
@@ -818,10 +818,8 @@
       grid.append(
         kvRow('CHANNEL', fmt(ev.channel)),
         kvRow('BEAT', `${fmt(ev.beat === null ? null : ev.beat + 1)} / ${fmt(ev.beatsPerChannel)}`),
-        kvRow('ACT LAST', ev.actLast ? '1' : '0', ev.actLast ? 'good' : ''),
-        kvRow('WEIGHT LAST', ev.weightLast ? '1' : '0', ev.weightLast ? 'good' : ''),
-        kvRow('ACT HANDSHAKE', ev.actH ? 'YES' : 'NO', ev.actH ? '' : 'bad'),
-        kvRow('WGT HANDSHAKE', ev.wgtH ? 'YES' : 'NO', ev.wgtH ? '' : 'bad'),
+        kvRow('CHANNEL END (derived)', ev.channelLast ? '1' : '0', ev.channelLast ? 'good' : ''),
+        kvRow('IN HANDSHAKE', ev.inH ? 'YES' : 'NO', ev.inH ? '' : 'bad'),
         kvRow('TASK BEAT', `${fmt(ev.inSeq)} / ${fmt(ev.taskId !== null ? trace.tasks[ev.taskId].expectedInput : null)}`),
         kvRow('WEIGHT HEX', ev.weight === null || ev.weight === undefined ? 'x' : '0x' + Number(ev.weight).toString(16).toUpperCase().padStart(Math.ceil(trace.weightWidth / 4), '0'))
       );
@@ -836,7 +834,7 @@
       const weights = weightBits(ev.weight, trace.weightWidth);
       frag.append(laneGrid('WEIGHT LANE', 'BIT 0 → ' + (weights.length - 1) + ' · 1=+1 / 0=-1', weights, 'wgt'));
       const flags = el('div', 'flag-row');
-      for (const [label, on] of [['act_last', ev.actLast], ['weight_last', ev.weightLast], ['act_hs', ev.actH], ['wgt_hs', ev.wgtH]]) {
+      for (const [label, on] of [['channel_end (derived)', ev.channelLast], ['in_valid && in_ready', ev.inH]]) {
         flags.append(el('span', 'flag' + (on ? ' on' : ''), label));
       }
       frag.append(flags);
@@ -864,7 +862,7 @@
       const grid = el('div', 'kv-grid');
       const task = ev.taskId !== null ? trace.tasks[ev.taskId] : null;
       grid.append(
-        kvRow('DONE_STATUS', fmt(ev.status), ev.status === 0 ? 'good' : 'bad'),
+        kvRow('SOURCE', '末 RES 握手'),
         kvRow('STATUS TEXT', ev.statusText || '未知'),
         kvRow('INPUT BEATS', `${fmt(task ? task.inputBeats : ev.inSeq)} / ${fmt(task ? task.expectedInput : null)}`),
         kvRow('RESULT BEATS', `${fmt(task ? task.resultBeats : ev.resSeq)} / ${fmt(task ? task.expectedResults : null)}`),
@@ -877,7 +875,7 @@
         box.textContent = task.issues.map((x) => x.text).join(' / ');
         frag.append(box);
       } else {
-        frag.append(el('div', 'detail-note', ev.status === 0 ? '完整任务已完成，输入与结果计数在该视图中校验。' : '任务未成功完成，部分结果可能已被外部接收。'));
+        frag.append(el('div', 'detail-note', ev.status === 0 ? '由 res_valid && res_ready && res_last 推导完成，没有独立完成通道；输入与结果计数在该视图中校验。' : '任务未成功完成，部分结果可能已被外部接收。'));
       }
     }
     body.replaceChildren(frag);

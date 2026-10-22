@@ -1,7 +1,7 @@
 'use strict';
 
-// Transaction flow canvas: four top-level channels, command tasks and the
-// packets that were actually transferred by successful handshakes.
+// Transaction flow canvas: three top-level channels. ACT/WGT share a handshake;
+// END is a derived last-result event, not a separate physical channel.
 (function (root) {
   const G = root.WD.gfx;
   const C = G.C;
@@ -43,13 +43,13 @@
       const bits = ev.actIdx === null || ev.actIdx < 0 ? 'x' : (trace.actVectors[ev.actIdx] || 'x').slice(0, 12);
       return `${t} IN  CH${ev.channel === null ? '-' : ev.channel}  BEAT ${ev.beat === null ? '-' : ev.beat + 1}/${ev.beatsPerChannel || '?'}` +
         `  A=${bits}  W=${ev.weight === null ? 'x' : '0x' + Number(ev.weight).toString(16).toUpperCase()}` +
-        `  AL${ev.actLast ? '1' : '0'} WL${ev.weightLast ? '1' : '0'}`;
+        `  CH_END(derived)=${ev.channelLast ? '1' : '0'}`;
     }
     if (ev.type === 'res') {
       return `${t} RES  CH${ev.channel === null ? '-' : ev.channel}  G${fmt(ev.group)}  ${fmt(ev.data)} (0x${ev.dataHex})` +
         `  CL${ev.chanLast ? '1' : '0'} L${ev.last ? '1' : '0'}`;
     }
-    return `${t} DONE  STATUS ${fmt(ev.status)}  ${ev.statusText || ''}`;
+    return `${t} END  res_valid && res_ready && res_last`;
   }
 
   class FlowView {
@@ -95,7 +95,7 @@
       };
       if (ev.type === 'cmd') add('cmd', 'C', LANE_COLORS.cmd);
       else if (ev.type === 'res') add('res', 'R', LANE_COLORS.res);
-      else if (ev.type === 'done') add('done', 'D', ev.status === 0 ? LANE_COLORS.done : C.RED);
+      else if (ev.type === 'done') add('res', 'END', LANE_COLORS.done);
       else if (ev.type === 'in') {
         if (ev.actH) add('act', 'A', LANE_COLORS.act, -1);
         if (ev.wgtH) add('wgt', 'W', LANE_COLORS.wgt, 1);
@@ -196,7 +196,6 @@
         act: { y: actY, x0: driverLeft + driverW + 8, x1: coreLeft - 8, dir: 1 },
         wgt: { y: wgtY, x0: driverLeft + driverW + 8, x1: coreLeft - 8, dir: 1 },
         res: { y: resY, x0: coreLeft + coreW + 8, x1: sinkLeft - 8, dir: -1 },
-        done: { y: doneY, x0: coreLeft + coreW + 8, x1: sinkLeft - 8, dir: -1 },
       };
       this.geom = { coreLeft, coreTop, coreW, coreH, lane, driverW, sinkW, driverLeft, sinkLeft };
 
@@ -225,7 +224,7 @@
     drawLegend(ctx, w) {
       let x = w - 18;
       const items = [
-        ['DONE', C.AMBER],
+        ['END*', C.AMBER],
         ['RES', C.CREAM],
         ['WGT', C.BLUE],
         ['ACT', C.GREEN],
@@ -267,8 +266,8 @@
       const s = state.trace.summary;
       const task = state.focusTask;
       const lines = task
-        ? [['RES', state.counts ? state.counts.res : 0], ['DONE', state.counts ? state.counts.done : 0]]
-        : [['RES', s.resEvents], ['DONE', s.doneEvents]];
+        ? [['RES', state.counts ? state.counts.res : 0], ['END*', state.counts ? state.counts.done : 0]]
+        : [['RES', s.resEvents], ['END*', s.doneEvents]];
       let yy = y + h - 28;
       for (const [label, value] of lines) {
         G.text(ctx, label, x + 10, yy, 9, C.DIM, { tracking: 1 });
@@ -285,7 +284,6 @@
         ['act', 'ACT', C.GREEN, counts ? counts.act : null],
         ['wgt', 'WGT', C.RUST_L, counts ? counts.wgt : null],
         ['res', 'RES', C.CREAM, counts ? counts.res : null],
-        ['done', 'DONE', C.AMBER, counts ? counts.done : null],
       ];
       for (const [key, label, color, count] of rows) {
         const L = lane[key];
@@ -347,9 +345,9 @@
         const s = trace.summary;
         const rows = [
           ['COMMANDS', s.tasks],
-          ['ACT BEATS', s.actHandshakes],
+          ['IN PAIRS', s.inHandshakes],
           ['RES BEATS', s.resEvents],
-          ['DONE', s.doneEvents],
+          ['END*', s.doneEvents],
         ];
         yy += 16;
         for (const [label, val] of rows) {
@@ -380,7 +378,7 @@
         }
       }
       G.hline(ctx, x + 10, y + h - 28, w - 20, C.METAL_D);
-      G.text(ctx, 'TOP-LEVEL ONLY', x + w / 2, y + h - 19, 8, C.FAINT, { align: 'center', tracking: 1 });
+      G.text(ctx, 'END* = LAST RES HANDSHAKE', x + w / 2, y + h - 19, 8, C.FAINT, { align: 'center', tracking: 1 });
     }
 
     drawMonitor(ctx, x, y, w, h, state) {

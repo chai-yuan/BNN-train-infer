@@ -11,28 +11,17 @@
   }
 })(typeof window !== 'undefined' ? window : null, function () {
   const KNOWN_SIGNALS = [
-    'clock', 'reset', 'ctrl_abort',
+    'clock', 'reset',
     'cmd_valid', 'cmd_ready', 'cmd_k_blocks', 'cmd_group_div', 'cmd_out_chans',
     'status_idle', 'status_busy',
-    'done_valid', 'done_ready', 'done_status',
-    'act_valid', 'act_ready', 'act_data', 'act_last',
-    'weight_valid', 'weight_ready', 'weight_data', 'weight_last',
+    'in_valid', 'in_ready', 'act_data', 'weight_data',
     'res_valid', 'res_ready', 'res_data', 'res_last', 'res_chan_last', 'res_group_idx',
   ];
   const SCORE_SIGNALS = [
     'clock', 'reset',
     'cmd_valid', 'cmd_ready',
-    'act_valid', 'act_ready',
-    'weight_valid', 'weight_ready',
+    'in_valid', 'in_ready',
     'res_valid', 'res_ready',
-    'done_valid', 'done_ready',
-  ];
-  const CHANNEL_PAIRS = [
-    ['cmd_valid', 'cmd_ready'],
-    ['act_valid', 'act_ready'],
-    ['weight_valid', 'weight_ready'],
-    ['res_valid', 'res_ready'],
-    ['done_valid', 'done_ready'],
   ];
   const TIME_FACTORS = { s: 1, ms: 1e-3, us: 1e-6, ns: 1e-9, ps: 1e-12, fs: 1e-15 };
 
@@ -262,25 +251,22 @@
         const names = new Set(scope.varList.map((v) => v.name));
         const score = SCORE_SIGNALS.reduce((sum, name) => sum + (names.has(name) ? 1 : 0), 0);
         if (score === 0) continue;
-        const missingChannels = CHANNEL_PAIRS
-          .filter(([valid, ready]) => !names.has(valid) || !names.has(ready))
-          .map(([valid]) => valid.replace(/_valid$/, ''));
         candidates.push({
           path: scope.path,
           module: scope.name,
           depth: scope.depth,
           score,
-          missingChannels,
+          missingSignals: KNOWN_SIGNALS.filter((name) => !names.has(name)),
           varCount: scope.varList.length,
           scope,
         });
       }
 
-      const usable = candidates.filter((c) => c.missingChannels.length === 0);
+      const usable = candidates.filter((c) => c.missingSignals.length === 0);
       if (!usable.length) {
         const best = candidates.sort((a, b) => b.score - a.score)[0];
         const detail = best
-          ? `最接近的作用域 ${best.path} 缺少通道: ${best.missingChannels.join(', ')}`
+          ? `最接近的作用域 ${best.path} 缺少信号: ${best.missingSignals.join(', ')}`
           : '没有找到包含 valid/ready 接口的作用域';
         throw new Error(`无法定位 bnn_core_top 握手接口：${detail}`);
       }
@@ -310,7 +296,9 @@
         if (!this.idToField.has(variable.id)) this.idToField.set(variable.id, index);
       }
 
-      if (!fields.clock) throw new Error('选中的顶层作用域没有 clock 信号');
+      if (missingSignals.length) {
+        throw new Error('选中的顶层作用域缺少必需信号: ' + missingSignals.join(', '));
+      }
 
       this.clockIndex = fields.clock.index;
       this.header = {

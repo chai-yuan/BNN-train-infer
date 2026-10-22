@@ -9,7 +9,7 @@
 TEST_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(TEST_DIR)/../..)
 RTL_DIR := $(ROOT)/bnn-hw/bnn_core
-BUILD_DIR := $(ROOT)/build/bnn-core-test
+BUILD_DIR ?= $(ROOT)/build/bnn-core-test
 VERILATOR ?= verilator
 JOBS ?= 2
 SEEDS ?= 1 7 42
@@ -25,14 +25,16 @@ RTL := $(RTL_DIR)/bnn_ctrl_fsm.sv \
        $(RTL_DIR)/bnn_core_top.sv
 TB := $(TEST_DIR)/tb_bnn_core.sv
 PARAM_TB := $(TEST_DIR)/tb_bnn_core_params.sv
+CONFIG_TB := $(TEST_DIR)/tb_bnn_core_config.sv
 SIM := $(BUILD_DIR)/obj/Vtb_bnn_core
+CONFIG_SIM := $(BUILD_DIR)/config/Vtb_bnn_core_config
 # Warnings remain fatal. These suppressions cover intentional testbench idioms.
 VFLAGS := --timing --assert -Wall -Wno-DECLFILENAME -Wno-BLKSEQ \
           -Wno-UNUSEDSIGNAL -Wno-PINCONNECTEMPTY
 
-.PHONY: test test-main test-params lint clean
+.PHONY: test test-main test-config test-params lint clean
 
-test: test-main test-params
+test: test-main test-config test-params
 
 test-main: $(SIM)
 	@set -eu; for seed in $(SEEDS); do \
@@ -49,6 +51,40 @@ $(SIM): $(RTL) $(TB) $(TEST_DIR)/Makefile
 	@mkdir -p $(BUILD_DIR)/obj
 	$(VERILATOR) --binary $(VFLAGS) --top-module tb_bnn_core \
 		--Mdir $(BUILD_DIR)/obj -j $(JOBS) $(RTL) $(TB)
+
+$(CONFIG_SIM): $(RTL) $(CONFIG_TB) $(TEST_DIR)/Makefile
+	@mkdir -p $(BUILD_DIR)/config
+	$(VERILATOR) --binary $(VFLAGS) --top-module tb_bnn_core_config \
+		--Mdir $(BUILD_DIR)/config -j $(JOBS) $(RTL) $(CONFIG_TB)
+
+# All guard scenarios must pass before the accepted-command assertion. Require
+# the specific RTL diagnostic as well as the expected nonzero runtime exit.
+test-config: $(CONFIG_SIM)
+	@set -eu; ulimit -c 0; \
+		$(CONFIG_SIM) +probe=0 > $(BUILD_DIR)/config/guards.log 2>&1 || { \
+			cat $(BUILD_DIR)/config/guards.log; exit 1; }; \
+		cat $(BUILD_DIR)/config/guards.log; \
+		for probe in 1 2 3 4 5 6 7 8; do \
+			case $$probe in \
+				1) diagnostic='cmd_k_blocks must be nonzero' ;; \
+				2) diagnostic='cmd_group_div must be nonzero' ;; \
+				3) diagnostic='cmd_out_chans must be nonzero' ;; \
+				4|5) diagnostic='cmd_k_blocks must be divisible by cmd_group_div' ;; \
+				6|7|8) diagnostic='command must contain at most 256 groups' ;; \
+			esac; \
+			out=$(BUILD_DIR)/config/probe-$$probe.log; \
+			if $(CONFIG_SIM) +probe=$$probe > "$$out" 2>&1; then \
+				cat "$$out"; printf 'FAIL: illegal command probe %s succeeded\n' "$$probe"; exit 1; \
+			fi; \
+			if ! grep -Fq '[GUARDS PASS]' "$$out" || \
+			   ! grep -Fq "[EXPECT ASSERT] probe=$$probe " "$$out" || \
+			   ! grep -Eq 'bnn_ctrl_fsm[.]sv:.*Assertion failed' "$$out" || \
+			   ! grep -Fq "$$diagnostic" "$$out" || \
+			   grep -Fq '[UNEXPECTED]' "$$out"; then \
+				cat "$$out"; printf 'FAIL: probe %s lacked its immediate RTL assertion\n' "$$probe"; exit 1; \
+			fi; \
+			printf 'PASS: command probe %s rejected at handshake (%s)\n' "$$probe" "$$diagnostic"; \
+		done
 
 # Build failures are never accepted as evidence of parameter rejection: each
 # probe must compile, then terminate nonzero with an RTL assertion diagnostic.
@@ -71,7 +107,7 @@ test-params:
 			cat "$$out/run.log"; \
 			printf 'FAIL: RTL accepted unsupported %s=%s\n' "$$param" "$$value"; exit 1; \
 		fi; \
-		if ! grep -Eq 'Assertion failed.*bnn_(core_top|addertree|group_acc|out_slice)' "$$out/run.log"; then \
+		if ! grep -Eq 'bnn_(core_top|addertree|group_acc|out_slice)[.]sv:.*Assertion failed' "$$out/run.log"; then \
 			cat "$$out/run.log"; \
 			printf 'FAIL: parameter probe exited without an RTL assertion\n'; exit 1; \
 		fi; \
@@ -81,6 +117,7 @@ test-params:
 lint:
 	$(VERILATOR) --lint-only $(VFLAGS) --top-module tb_bnn_core $(RTL) $(TB)
 	$(VERILATOR) --lint-only $(VFLAGS) --top-module tb_bnn_core_params $(RTL) $(PARAM_TB)
+	$(VERILATOR) --lint-only $(VFLAGS) --top-module tb_bnn_core_config $(RTL) $(CONFIG_TB)
 
 clean:
 	rm -rf -- $(BUILD_DIR)

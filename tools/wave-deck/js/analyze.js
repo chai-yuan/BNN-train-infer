@@ -12,9 +12,6 @@
 })(typeof window !== 'undefined' ? window : null, function (Vcd) {
   const STATUS = {
     0: { key: 'ok', zh: '成功', short: 'OK' },
-    1: { key: 'cfg', zh: '配置错误', short: 'CFG' },
-    2: { key: 'aborted', zh: '已中止', short: 'ABRT' },
-    3: { key: 'protocol', zh: '输入协议错误', short: 'PROTO' },
   };
 
   function unsigned(raw, width) {
@@ -62,7 +59,7 @@
       this.widths = {};
       this.activeTask = null;
       this.prevReset = null;
-      this.prevAbort = false;
+      this.pendingStalls = new Map();
       this.busy = false;
       this.busyStart = null;
       this.prevEdgeTime = null;
@@ -100,9 +97,12 @@
           tasks: 0,
           ok: 0,
           failed: 0,
+          canceled: 0,
+          completed: 0,
           unfinished: 0,
           cmdEvents: 0,
           inEvents: 0,
+          inHandshakes: 0,
           actHandshakes: 0,
           weightHandshakes: 0,
           resEvents: 0,
@@ -112,8 +112,9 @@
           busyCycles: 0,
           resetCycles: 0,
           droppedEvents: 0,
-          stalls: { cmd: 0, act: 0, weight: 0, res: 0, done: 0 },
+          stalls: { cmd: 0, in: 0, act: 0, weight: 0, res: 0, done: 0 },
         },
+        completionSource: 'res_valid && res_ready && res_last',
         actWidth: widths.act_data || 256,
         weightWidth: widths.weight_data || 32,
         resWidth: widths.res_data || 32,
@@ -184,6 +185,32 @@
       return index;
     }
 
+    checkStability(cycle, raw) {
+      const channels = {
+        cmd: ['cmd_k_blocks', 'cmd_group_div', 'cmd_out_chans'],
+        in: ['act_data', 'weight_data'],
+        res: ['res_data', 'res_last', 'res_chan_last', 'res_group_idx'],
+      };
+      for (const [channel, payload] of Object.entries(channels)) {
+        // Normalize short/zero-padded VCD binary encodings before comparing.
+        const snapshot = [channel + '_valid', ...payload].map((name) => {
+          const value = raw(name);
+          return value === undefined ? null : value.padStart(this.widths[name], /^[xz]/i.test(value) ? value[0] : '0');
+        });
+        const previous = this.pendingStalls.get(channel);
+        if (previous && snapshot.some((value, i) => value !== previous[i])) {
+          const text = channel + ' 反压期间 valid/负载未保持稳定';
+          if (this.activeTask) this.taskIssue(this.activeTask, text, cycle);
+          else this.addWarning(text, cycle, 'stability-' + channel);
+        }
+        if (raw(channel + '_valid') === '1' && raw(channel + '_ready') !== '1') {
+          this.pendingStalls.set(channel, snapshot);
+        } else {
+          this.pendingStalls.delete(channel);
+        }
+      }
+    }
+
     onEdge(cycle, time, values) {
       const s = this.trace.summary;
       this.values = values;
@@ -205,11 +232,12 @@
       const reset = one('reset');
       if (reset) {
         s.resetCycles++;
+        this.pendingStalls.clear();
         if (this.prevReset !== true) {
           this.marker('reset', cycle, time, '复位');
           if (this.activeTask) {
             const task = this.activeTask;
-            this.taskIssue(task, '任务被复位中断，未收到完成握手', cycle);
+            this.taskIssue(task, '任务被复位取消（无完成通知）', cycle);
             this.closeTask(task, cycle - 1, 'reset');
           }
         }
@@ -224,15 +252,7 @@
       if (this.prevReset === true) this.marker('reset_release', cycle, time, '复位释放');
       this.prevReset = false;
 
-      const abort = one('ctrl_abort');
-      if (abort && !this.prevAbort) {
-        this.marker('abort', cycle, time, '中止');
-        if (this.activeTask) {
-          this.activeTask.abortCycle = cycle;
-          this.taskIssue(this.activeTask, '运行中收到 ctrl_abort', cycle);
-        }
-      }
-      this.prevAbort = abort;
+      this.checkStability(cycle, raw);
 
       const busy = one('status_busy');
       if (busy) {
@@ -249,24 +269,43 @@
       }
 
       if (one('cmd_valid') && !one('cmd_ready')) s.stalls.cmd++;
-      if (one('act_valid') && !one('act_ready')) { s.stalls.act++; if (this.activeTask) this.activeTask.stalls.act++; }
-      if (one('weight_valid') && !one('weight_ready')) { s.stalls.weight++; if (this.activeTask) this.activeTask.stalls.weight++; }
-      if (one('res_valid') && !one('res_ready')) { s.stalls.res++; if (this.activeTask) this.activeTask.stalls.res++; }
-      if (one('done_valid') && !one('done_ready')) {
-        s.stalls.done++;
-        if (this.activeTask) this.activeTask.doneWaitCycles++;
+      if (one('in_valid') && !one('in_ready')) {
+        s.stalls.in++;
+        s.stalls.act++;
+        s.stalls.weight++;
+        if (this.activeTask) {
+          this.activeTask.stalls.in++;
+          this.activeTask.stalls.act++;
+          this.activeTask.stalls.weight++;
+        }
+      }
+      if (one('res_valid') && !one('res_ready')) {
+        s.stalls.res++;
+        if (this.activeTask) {
+          this.activeTask.stalls.res++;
+          if (one('res_last')) this.activeTask.doneWaitCycles++;
+        }
       }
 
       const cmdH = one('cmd_valid') && one('cmd_ready');
-      const actH = one('act_valid') && one('act_ready');
-      const wgtH = one('weight_valid') && one('weight_ready');
+      const inH = one('in_valid') && one('in_ready');
       const resH = one('res_valid') && one('res_ready');
-      const doneH = one('done_valid') && one('done_ready');
-
-      if (cmdH) this.handleCommand(cycle, time, raw);
-      if (actH || wgtH) this.handleInput(cycle, time, raw, actH, wgtH);
+      // A new command is forbidden on the final-result edge, even though that
+      // edge closes the old task. Attribute its result to the old task first.
+      const overlappingCommand = cmdH && !!this.activeTask;
+      if (overlappingCommand) {
+        this.taskIssue(this.activeTask, '新命令在上一任务完成前或末结果同沿被接收', cycle);
+      }
+      if (cmdH && !overlappingCommand) this.handleCommand(cycle, time, raw);
+      if (inH) {
+        if (this.activeTask && this.activeTask.cmdCycle === cycle) {
+          this.taskIssue(this.activeTask, '首对输入不得与命令同沿接收', cycle);
+        }
+        this.handleInput(cycle, time, raw);
+      }
       if (resH) this.handleResult(cycle, time, raw);
-      if (doneH) this.handleDone(cycle, time, raw);
+      if (resH && one('res_last')) this.handleDone(cycle, time);
+      if (overlappingCommand) this.handleCommand(cycle, time, raw);
     }
 
     handleCommand(cycle, time, raw) {
@@ -294,6 +333,7 @@
         cmdTime: time,
         endCycle: null,
         doneCycle: null,
+        completionSource: null,
         status: 'running',
         statusCode: null,
         statusText: '运行中',
@@ -321,11 +361,10 @@
         busyCycles: 0,
         doneWaitCycles: 0,
         droppedEvents: 0,
-        stalls: { act: 0, weight: 0, res: 0 },
+        stalls: { in: 0, act: 0, weight: 0, res: 0 },
         issues: [],
         events: [],
         verified: false,
-        abortCycle: null,
       };
       this.trace.tasks.push(task);
       s.tasks = this.trace.tasks.length;
@@ -352,14 +391,14 @@
       }
     }
 
-    handleInput(cycle, time, raw, actH, wgtH) {
+    handleInput(cycle, time, raw) {
       const s = this.trace.summary;
       s.inEvents++;
-      if (actH) s.actHandshakes++;
-      if (wgtH) s.weightHandshakes++;
+      s.inHandshakes++;
+      s.actHandshakes++;
+      s.weightHandshakes++;
       const task = this.activeTask;
-      const actLast = raw('act_last') === '1';
-      const weightLast = raw('weight_last') === '1';
+      let channelLast = null;
       let channel = null;
       let beat = null;
 
@@ -375,13 +414,7 @@
           channel = Math.floor(before / task.beatsPerChannel);
           beat = before % task.beatsPerChannel;
           task.inputChannels = Math.max(task.inputChannels, channel + 1);
-          const expectedLast = beat === task.beatsPerChannel - 1;
-          if (actLast !== weightLast) {
-            this.taskIssue(task, 'act_last 与 weight_last 不一致', cycle);
-          }
-          if (expectedLast !== actLast || expectedLast !== weightLast) {
-            this.taskIssue(task, '输入 last 与通道边界不一致（通道 ' + channel + '，拍 ' + beat + '）', cycle);
-          }
+          channelLast = beat === task.beatsPerChannel - 1;
           if (task.legal && task.expectedInput !== null && task.inputBeats > task.expectedInput) {
             this.taskIssue(task, '输入握手数超过 N×k_blocks', cycle);
           }
@@ -404,10 +437,13 @@
         beat,
         k: task ? task.k : null,
         beatsPerChannel: task ? task.beatsPerChannel : null,
-        actH,
-        wgtH,
-        actLast,
-        weightLast,
+        inH: true,
+        actH: true,
+        wgtH: true,
+        channelLast,
+        actLast: channelLast,
+        weightLast: channelLast,
+        boundarySource: 'cmd_k_blocks + input count',
         actIdx: this.internAct(raw('act_data')),
         weight: unsigned(raw('weight_data'), this.widths.weight_data),
       };
@@ -440,6 +476,9 @@
           if (chanLast !== expectedChanLast) {
             this.taskIssue(task, 'res_chan_last 与组边界不一致（通道 ' + channel + '，组 ' + groupIdx + '）', cycle);
           }
+        }
+        if (task.expectedResults !== null && last !== (task.resultBeats === task.expectedResults)) {
+          this.taskIssue(task, 'res_last 与任务末结果边界不一致', cycle);
         }
         if (last && !chanLast) this.taskIssue(task, 'res_last 置位但 res_chan_last 为 0', cycle);
         if (task.expectedResults !== null && task.resultBeats > task.expectedResults) {
@@ -475,42 +514,32 @@
       this.pushEvent(event, task);
     }
 
-    handleDone(cycle, time, raw) {
-      const s = this.trace.summary;
-      s.doneEvents++;
-      const code = unsigned(raw('done_status'), this.widths.done_status);
-      const status = STATUS[code] || { key: 'unknown', zh: '未知状态', short: '?' };
+    handleDone(cycle, time) {
+      // UI compatibility event: derived from the accepted final RES, never a
+      // physical DONE channel. Keep it even when result details hit the cap.
       const task = this.activeTask;
-
-      if (!task) {
-        this.addWarning('收到无对应任务的完成握手', cycle, 'orphan-done');
-      }
-
-      if (this.canKeep('done')) {
-        const event = {
-          type: 'done',
-          cycle,
-          time,
-          taskId: task ? task.id : null,
-          inSeq: task ? task.inputBeats : null,
-          resSeq: task ? task.resultBeats : null,
-          status: code,
-          statusText: status.zh,
-          inChannel: task ? task.inputChannels : null,
-          resChannel: task ? task.resultChannels : null,
-        };
-        this.pushEvent(event, task);
-      }
-
-      if (task) {
-        task.statusCode = code;
-        task.statusKey = status.key;
-        task.statusText = status.zh;
-        task.doneStatusRaw = raw('done_status');
-        task.doneCycle = cycle;
-        this.closeTask(task, cycle, status.key);
-        this.activeTask = null;
-      }
+      if (!task) return;
+      this.trace.summary.doneEvents++;
+      this.pushEvent({
+        type: 'done',
+        derived: true,
+        source: this.trace.completionSource,
+        cycle,
+        time,
+        taskId: task.id,
+        inSeq: task.inputBeats,
+        resSeq: task.resultBeats,
+        status: 0,
+        statusText: '成功（末结果握手推导）',
+        inChannel: task.inputChannels,
+        resChannel: task.resultChannels,
+      }, task);
+      task.statusCode = 0;
+      task.statusKey = 'ok';
+      task.doneStatusRaw = null;
+      task.doneCycle = cycle;
+      task.completionSource = this.trace.completionSource;
+      this.closeTask(task, cycle, 'ok');
     }
 
     closeTask(task, endCycle, statusKey) {
@@ -518,9 +547,6 @@
       task.endCycle = Math.max(task.cmdCycle, endCycle);
       task.status = statusKey;
       if (statusKey === 'ok') task.statusText = '成功';
-      else if (statusKey === 'cfg') task.statusText = '配置错误';
-      else if (statusKey === 'aborted') task.statusText = '已中止';
-      else if (statusKey === 'protocol') task.statusText = '协议错误';
       else if (statusKey === 'reset') task.statusText = '复位中断';
       else if (statusKey === 'superseded') task.statusText = '被新任务覆盖';
       else if (statusKey === 'unfinished') task.statusText = '未完成';
@@ -538,16 +564,14 @@
       task.drainLag = task.lastResultCycle === null ? null : task.endCycle - task.lastResultCycle;
       task.inDensity = task.inputSpan ? task.inputBeats / task.inputSpan : 0;
       task.resDensity = task.resultSpan ? task.resultBeats / task.resultSpan : 0;
-      task.stallTotal = task.stalls.act + task.stalls.weight + task.stalls.res;
+      task.stallTotal = task.stalls.in + task.stalls.res;
 
-      if (task.status === 'ok' || task.status === 'aborted' || task.status === 'protocol') {
-        if (task.status === 'ok' && task.legal) {
-          if (task.expectedInput !== null && task.inputBeats !== task.expectedInput) {
-            this.taskIssue(task, '成功完成但输入握手数为 ' + task.inputBeats + '，期望 ' + task.expectedInput, task.endCycle);
-          }
-          if (task.expectedResults !== null && task.resultBeats !== task.expectedResults) {
-            this.taskIssue(task, '成功完成但结果握手数为 ' + task.resultBeats + '，期望 ' + task.expectedResults, task.endCycle);
-          }
+      if (task.status === 'ok' && task.legal) {
+        if (task.expectedInput !== null && task.inputBeats !== task.expectedInput) {
+          this.taskIssue(task, '成功完成但输入握手数为 ' + task.inputBeats + '，期望 ' + task.expectedInput, task.endCycle);
+        }
+        if (task.expectedResults !== null && task.resultBeats !== task.expectedResults) {
+          this.taskIssue(task, '成功完成但结果握手数为 ' + task.resultBeats + '，期望 ' + task.expectedResults, task.endCycle);
         }
       }
       task.verified = task.status === 'ok' && task.issues.length === 0;
@@ -569,7 +593,12 @@
       const s = this.trace.summary;
       for (const task of this.trace.tasks) this.finalizeTask(task);
       for (const task of this.trace.tasks) {
-        if (task.status === 'ok' && task.verified) s.ok++;
+        if (task.status === 'ok') {
+          s.completed++;
+          if (task.verified) s.ok++;
+          else s.failed++;
+        }
+        else if (task.status === 'reset') s.canceled++;
         else if (task.status === 'unfinished') s.unfinished++;
         else s.failed++;
       }

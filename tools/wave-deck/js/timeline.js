@@ -11,7 +11,7 @@
     { key: 'act', label: 'ACT', color: C.GREEN },
     { key: 'wgt', label: 'WGT', color: C.BLUE },
     { key: 'res', label: 'RES', color: C.CREAM },
-    { key: 'done', label: 'DONE', color: C.AMBER },
+    { key: 'done', label: 'END*', color: C.AMBER },
     { key: 'busy', label: 'BUSY', color: C.GREEN_D },
   ];
 

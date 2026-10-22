@@ -44,19 +44,26 @@ BNN_RTL_TRACE_DIR="$PWD/build/model-waves" ./bnn-infer --profile model.bnn
 | 事务 | 触发条件 | 携带信息 |
 | --- | --- | --- |
 | `CMD` | `cmd_valid && cmd_ready` | k_blocks、group_div、out_chans，推导 K/groups/N 和合法性 |
-| `IN` | `act_valid && act_ready` 与 `weight_valid && weight_ready` | 通道号、通道内拍号、32 路 int8 激活、32 位权重、last 标志 |
+| `IN` | `in_valid && in_ready` | 同时消费 act_data/weight_data；通道号、通道内拍号与通道末拍由命令及配对输入计数推导 |
 | `RES` | `res_valid && res_ready` | int32 结果、通道号、组号、`res_chan_last`、`res_last` |
-| `DONE` | `done_valid && done_ready` | 状态码、成功/配置错误/中止/协议错误 |
+| `END`（推导事件） | `res_valid && res_ready && res_last` | 与末 RES 同周期生成的成功完成记录；不是独立完成通道 |
 
-一次 CMD 握手开启一个任务，DONE 握手关闭任务。工具会校验：
+一次 CMD 握手锁存配置并开启任务；首对输入最早在下一上升沿接收。末结果握手是
+唯一成功完成条件：`res_last=1` 但 `res_ready=0` 时任务仍在运行；末结果交付同沿
+不能接收 CMD，下一上升沿可以接收。`status_idle/status_busy` 保留用于状态观测。
+reset 取消任务并清空配置、计数和反压检查状态，不生成完成通知。
 
-- 输入拍数是否符合 `N × k_blocks`；
-- 输入 `last` 是否落在通道最后一拍；
+工具会校验：
+
+- 配对输入拍数是否符合 `N × k_blocks`，按 `k_blocks` 推导每通道边界；
 - 结果数是否符合 `N × groups`；
-- `res_group_idx` 是否连续、`res_chan_last` 与组边界是否一致；
-- 成功任务的两路计数是否与命令参数一致；
-- 复位中断、运行中中止、孤儿握手、任务未完成等异常。
+- `res_group_idx` 是否连续，`res_chan_last` / `res_last` 是否与通道 / 任务边界一致；
+- CMD、IN、RES 在 `valid && !ready` 后，直到接收沿的 valid 和全部负载是否保持稳定；
+- CMD / 首对输入同沿、末结果 / 下一命令同沿、复位取消、孤儿握手、任务未完成等情况。
 
+非法配置由外层保证不提交，RTL 仿真 assert；分析器只对错误波形给出诊断，
+不虚构配置错误响应。新接口没有 `ctrl_abort`、`done_*`、`res_error`，也没有
+独立 ACT/WGT 的 valid/ready 或物理 `act_last/weight_last`。
 这些检查只在顶层可见信号上完成，不读取内部状态或参考模型。
 
 ### 采样语义
@@ -69,9 +76,9 @@ Verilator 在时钟上升沿的同一时间戳里会同时写入时钟跳变和�
 ## 界面
 
 - **任务 / COMMANDS**：按 CMD 握手切分；点击聚焦任务，时间线自动缩放到任务窗口。
-- **数据流 / HANDSHAKE FLOW**：DRIVER → CORE → SINK 的 CMD、ACT、WGT、RES、DONE
-  五条通道；播放时握手包沿通道移动，核心面板显示当前任务的计数和进度。
-- **时间线 / DENSITY**：每行是一条通道的握手密度，不是逐周期波形；`BUSY` 显示
+- **数据流 / HANDSHAKE FLOW**：DRIVER → CORE → SINK 的命令、配对输入、结果及推导完成事件；
+  ACT/WGT 分开展示同一个 IN 握手的两路负载；`END*` 仅标注末结果交付，不绘制独立完成通道。
+- **时间线 / DENSITY**：各行显示通道握手密度或推导事件（`END*`），不是逐周期波形；`BUSY` 显示
   `status_busy` 占空段。滚轮缩放，双击或 `FIT` 适应当前任务/全波形。
 - **检视 / INSPECT**：`握手` 页给出事件表与负载（激活 lane、权重 bit、结果）；
   `统计` 页给出全局和当前任务的性能/协议摘要。
@@ -84,7 +91,7 @@ Verilator 在时钟上升沿的同一时间戳里会同时写入时钟跳变和�
 全局：
 
 - 上升沿数、非复位周期、忙碌周期与占空比；
-- CMD、输入、结果、完成握手数量；
+- CMD、配对输入、结果握手数量，以及由末结果握手推导的完成任务数；
 - 各通道 `valid && !ready` 停顿计数；
 - 时钟周期与波形时长（来自 `$timescale`）。
 
@@ -92,7 +99,7 @@ Verilator 在时钟上升沿的同一时间戳里会同时写入时钟跳变和�
 
 - 周期范围、输入/结果首事件偏移、结果排空滞后；
 - 输入拍密度、结果密度、通道完成数；
-- 忙周期、完成通知等待周期、停顿计数；
+- 忙周期、末结果反压等待周期、停顿计数（配对输入只计一次）；
 - 期望/实际握手数和协议提示。
 
 ## 文件结构
@@ -113,14 +120,37 @@ tools/wave-deck/
 
 解析器与界面解耦：`analyzeVcd(file)` 返回纯数据结构 `trace`，其中包含
 `header`、`tasks`、`events`、`markers`、`warnings`、`summary`。
-后续接入更多顶层模块或增加性能图表时，可以复用解析/任务层，只替换或增加视图。
+### 数据 schema 与 UI 兼容
+
+- 输入事件仍为 `type: 'in'`，新增 `inH: true`；`actH === wgtH === inH`。
+  `summary.inHandshakes`、`actHandshakes`、`weightHandshakes` 都是配对输入握手数。
+- 新增 `ev.channelLast`；兼容字段 `actLast` / `weightLast` 均等于它，来源标注为
+  `boundarySource: 'cmd_k_blocks + input count'`，不是物理端口。没有对应任务时边界为 `null`。
+- 保留 `type: 'done'`，其 `derived: true`、`source: 'res_valid && res_ready && res_last'`。
+  它紧随末 RES 事件、与其同周期；没有独立 DONE 反压。
+  `task.doneCycle === task.lastResultCycle`，`task.completionSource` 和
+  `trace.completionSource` 标明相同推导来源；成功 `statusCode: 0` 是软件兼容值，
+  `doneStatusRaw: null`，不对应物理状态码。
+- `summary.completed === summary.doneEvents`：实际交付末结果的任务数；`ok` 为其中
+  通过分析器校验的任务，`failed` 为校验失败或被新命令覆盖的任务。
+  `canceled` 为 reset 取消数，单独统计，不计入 `failed`；`unfinished` 为波形结束仍未完成数。
+- 新增全局 / 任务 `stalls.in`；兼容 `stalls.act` / `stalls.weight` 均为同一输入停顿数，
+  `task.stallTotal = stalls.in + stalls.res`，避免重复计算。
+  全局 `stalls.done` 固定为 0；`task.doneWaitCycles` 表示末结果被反压的周期数。
+- reset 任务保留 `status: 'reset'`，`doneCycle` / `completionSource` 为 `null`，没有 DONE 事件。
+  不再产生配置错误、abort 或协议错误的硬件完成状态；协议问题记录在 `issues` / `warnings`。
+
+`samples/demo.vcd` 来自当前已编译新 RTL，通过公共 BNN API 执行两个 K128/N2/G128
+任务（DOT_GROUPS、GEMV）。28 个上升沿，16 次配对输入、4 次结果握手，两个任务
+分别在周期 14 / 27 完成；原始结果为 `[128, -128]`，无合成的旧端口。
 
 ## 边界
 
 - 仅支持 VCD；FST 需先转换。
 - 仅读取选中作用域的直接变量；当前自动优先 `bnn_core_top`，没有该模块名时选择
   握手接口最完整的顶层作用域。
-- 当前要求五组 `valid/ready` 通道都存在；其他模块接口需要增加适配层。
+- 要求 CMD、IN、RES 三组 `valid/ready`、clock/reset、命令参数、status_idle/status_busy
+  及全部输入/结果负载端口存在；缺失时直接报错，不适配旧顶层端口。
 - 事件明细上限为 50 万条；超过后任务计数和统计仍然准确，但输入/结果明细会省略。
 - VCD 中若没有时钟上升沿、缺少握手端口或头部损坏，会直接报错。
 - 时间线是握手密度和任务窗口，不是门级/周期级时序波形。
@@ -132,7 +162,8 @@ cd tools/wave-deck
 make test
 ```
 
-测试覆盖：不规则分块流式解析、作用域自动选择、预跳变握手采样、任务参数/计数、
-激活 lane 解码、复位期间屏蔽握手、非法配置完成、运行中 abort，以及示例波形计数。
+测试覆盖：不规则分块流式解析、作用域自动选择、预跳变握手采样、共用输入与推导边界、
+三通道反压稳定性、末结果阻塞不提前完成、下一拍命令、reset 取消与清理、缺失新端口、
+事件上限下的完成统计、非法配置诊断，以及真实新 RTL 示例的计数与 lane 解码。
 字体使用 Fusion Pixel（SIL Open Font License 1.1，许可证见
 `assets/fonts/OFL-fusion-pixel.txt`）。

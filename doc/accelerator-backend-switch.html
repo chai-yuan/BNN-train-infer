@@ -1017,7 +1017,7 @@ return BNN_OK;</code></pre>
   <p style="margin-top:18px">桥接层在 <code>bnn_rtl_create</code> 里完成三件事：创建 <code>VerilatedContext</code>（单线程），构造生成的 <code>Vbnn_core_top</code>，并把核心复位到空闲状态。如果设置了波形目录，还会在这里注册 VCD。</p>
 
   <div class="codeblock">
-    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:28-46 · 仿真实例</span><span class="lang">C++</span></div>
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp · 仿真实例</span><span class="lang">C++</span></div>
 <pre><code>struct bnn_rtl_sim {
     VerilatedContext context;
     std::unique_ptr&lt;Vbnn_core_top&gt; core;
@@ -1194,7 +1194,7 @@ for (n = 0; n &lt; matrix-&gt;out_features; ++n) {
     <div class="section-index">06 / 08</div>
     <div>
       <h2>桥接层：把一次函数调用拆成一个个时钟周期</h2>
-      <p class="section-intro">这是整条链路里最“硬件”的部分。桥接层同时扮演三个角色：命令发起者、激活/权重供数者、结果接收者。它每拍驱动一次 Verilator 模型，直到收到完整的 <code>done</code> 握手。</p>
+      <p class="section-intro">这是整条链路里最“硬件”的部分。桥接层同时扮演三个角色：命令发起者、激活/权重供数者、结果接收者。它每拍驱动一次 Verilator 模型，直到最后结果满足 <code>res_valid &amp;&amp; res_ready &amp;&amp; res_last</code> 并推进该握手上升沿；这是核心唯一的成功完成事件。</p>
     </div>
   </div>
 
@@ -1215,9 +1215,9 @@ for (n = 0; n &lt; matrix-&gt;out_features; ++n) {
         <p><code>BNN_DeviceOpen</code> 通过公共校验后，verilator 后端调用 <code>bnn_rtl_create</code>。桥接层创建 <code>VerilatedContext</code>（单线程），构造生成的 <code>Vbnn_core_top</code>，可选打开 VCD，然后把核心复位。</p>
         <ul>
           <li>每个 <code>BNN_Device</code> 拥有自己的 context 和模型，互不共享状态。</li>
-          <li>复位会把命令、数据、结果、完成接口全部清零，并推进两个时钟周期。</li>
+          <li>桥接层撤销命令与共用输入 valid、清空驱动数据并拉低结果 ready，再以高有效同步 reset 推进两个时钟周期。核心在有效沿清空全部锁存配置、计数和数据有效位；reset 置位期间屏蔽所有握手，无取消通知。</li>
         </ul>
-        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:33-38</span><span class="lang">C++</span></div>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp</span><span class="lang">C++</span></div>
 <pre><code>context.threads(1);
 context.traceEverOn(true);
 core.reset(new Vbnn_core_top(&amp;context));</code></pre></div>
@@ -1275,28 +1275,27 @@ for (m = 0; m &lt; job-&gt;rows; ++m) {
 
       <article class="jpanel" id="jp-4" role="tabpanel" aria-labelledby="jt-4" hidden>
         <div class="jpanel-top"><h3>发命令：K / G / N 变成三个计数字段</h3><span class="stage-tag">cmd handshake</span></div>
-        <p>桥接层先确认核心处于 idle 且 <code>cmd_ready</code> 为 1，然后写入三个尺寸字段，并让 <code>cmd_valid</code> 保持到命令被接收。结果和完成通道则提前置 <code>ready</code>。</p>
-        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:174-178</span><span class="lang">C++</span></div>
+        <p>桥接层提交前保证三个尺寸非零、K/G 整除且 groups≤256；核心仅保留仿真 assert，不产生运行时错误码。先确认核心处于 idle 且 <code>cmd_ready</code> 为 1，再写入三个尺寸，并保持 <code>cmd_valid</code> 到命令握手沿；该沿锁存尺寸并启动任务。结果通道提前置 <code>res_ready</code>。</p>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp</span><span class="lang">C++</span></div>
 <pre><code>if (!core.status_idle || !core.cmd_ready)
     return recover(sim, BNN_EIO);
 
 core.cmd_k_blocks  = blocks;          // K / 32
 core.cmd_group_div = group_size / 32; // G / 32
 core.cmd_out_chans = out_features;    // N
-core.res_ready  = 1;
-core.done_ready = 1;</code></pre></div>
+core.res_ready = 1;</code></pre></div>
         <div class="journey-foot"><span class="ref">cmd_valid 不撤销，直到 cmd_ready 采样为 1</span></div>
       </article>
 
       <article class="jpanel" id="jp-5" role="tabpanel" aria-labelledby="jt-5" hidden>
         <div class="jpanel-top"><h3>流式喂数：每拍 32 个 k</h3><span class="stage-tag">act / weight</span></div>
-        <p>命令被接收后，桥接层每个周期同时给 <code>act_valid</code> 和 <code>weight_valid</code>。只要两路 ready 允许，一拍推进 32 个 k：32 个激活（8 个 32-bit word）和 32 个权重位（1 个 32-bit word）。</p>
+        <p>命令被接收后，桥接层以 <code>in_valid</code> 同时声明激活和权重有效，并在 <code>in_ready</code> 允许时通过一次共用握手推进 32 个 k：32 个激活（8 个 32-bit word）和 32 个权重位（1 个 32-bit word）。没有双输入独立握手；阻塞期间必须保持 valid 和两份数据。</p>
         <ul>
           <li>流是<strong>通道优先</strong>：先送完 channel 0 的全部 block，再送 channel 1。</li>
           <li>同一组激活会在每个输出通道重放一次，因为核心没有内部激活缓存。</li>
-          <li><code>act_last</code>/<code>weight_last</code> 只在每个通道最后一拍为 1。</li>
+          <li><code>cmd_k_blocks</code>/<code>cmd_group_div</code> 与已握手拍数决定通道和逻辑组边界，输入没有 last。</li>
         </ul>
-        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:183-201</span><span class="lang">C++</span></div>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp</span><span class="lang">C++</span></div>
 <pre><code>const size_t block   = size_t(sent % blocks);
 const size_t channel = size_t(sent / blocks);
 const size_t offset  = block * 32;
@@ -1305,16 +1304,18 @@ for (unsigned word = 0; word &lt; 8; ++word) { /* 32 个 int8 */ }
 const size_t weight_offset =
     channel * (in_features / 8) + block * 4;
 
-core.act_last = block == blocks - 1;
-core.weight_last = core.act_last;</code></pre></div>
+// 用 block/channel 定位数据；边界由核心握手计数推导。
+// 仅 in_valid &amp;&amp; in_ready 时递增 sent。</code></pre></div>
         <div class="journey-foot"><span class="ref">input_beats = (K/32) × N</span></div>
       </article>
 
       <article class="jpanel" id="jp-6" role="tabpanel" aria-labelledby="jt-6" hidden>
-        <div class="jpanel-top"><h3>收结果：N × groups 个 int32</h3><span class="stage-tag">res / done</span></div>
-        <p>结果按 <code>[channel][group]</code> 顺序返回。桥接层用 <code>received</code> 计数校验组号与边界标志，把 <code>res_data</code> 逐个复制到 <code>dots</code>。最后等待 <code>done</code> 握手，检查状态和收发数量。</p>
-        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:208-232</span><span class="lang">C++</span></div>
-<pre><code>if (core.res_valid &amp;&amp; core.res_ready) {
+        <div class="jpanel-top"><h3>收结果：N × groups 个 int32</h3><span class="stage-tag">res / last</span></div>
+        <p>结果按 <code>[channel][group]</code> 顺序返回。桥接层用 <code>received</code> 计数校验组号与边界标志，把 <code>res_data</code> 逐个复制到 <code>dots</code>。仅在最后结果满足 <code>res_valid &amp;&amp; res_ready &amp;&amp; res_last</code> 且推进握手沿后，核对收发数量及 cmd_ready 后返回成功，不额外等待完成周期；无独立完成通道或 res_error。</p>
+        <div class="codeblock"><div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp</span><span class="lang">C++</span></div>
+<pre><code>const bool task_complete =
+    core.res_valid &amp;&amp; core.res_ready &amp;&amp; core.res_last;
+if (core.res_valid &amp;&amp; core.res_ready) {
     if (received &gt;= result_count ||
         core.res_group_idx != received % groups ||
         bool(core.res_chan_last) != (received % groups == groups - 1) ||
@@ -1325,13 +1326,18 @@ core.weight_last = core.act_last;</code></pre></div>
     ++received;
 }
 
-if (done) {
-    if (status != 0 || !accepted ||
-        sent != input_beats || received != result_count)
+// 本拍命令/输入计数也按握手更新；完整循环见下文。
+sim-&gt;tick(); // 真正推进最后结果握手沿，核心回到 IDLE
+if (task_complete) {
+    if (!accepted || sent != input_beats || received != result_count || !core.cmd_ready)
         return recover(sim, BNN_EIO);
+    core.cmd_valid = 0;
+    core.in_valid = 0;
+    core.eval();
+    sim-&gt;flush_trace();
     return BNN_OK;
 }</code></pre></div>
-        <div class="journey-foot"><span class="ref">成功完成 = 命令已收 + 输入送够 + 结果收够 + status 0</span></div>
+        <div class="journey-foot"><span class="ref">成功完成 = 最后结果握手沿；桥接另核对命令及收发计数</span></div>
       </article>
 
       <article class="jpanel" id="jp-7" role="tabpanel" aria-labelledby="jt-7" hidden>
@@ -1373,10 +1379,10 @@ acc   = FloatAdd(acc, term);</code></pre></div>
     <div class="word"><b>act[7]</b>k28–k31<span>4 × int8</span></div>
   </div>
   <div class="weight-strip"><b>weight_data[31:0]</b><span class="bits" aria-hidden="true"></span><span style="font-size:9.5px;color:#9e988d">bit i = W[n][k0+i]，1 → +1，0 → −1</span></div>
-  <p class="beat-caption">激活按字节小端拼装（byte 0 落在 bit 0..7）；权重按位平铺。两者在同一拍成对握手，核心不会单独消费其中一路。</p>
+  <p class="beat-caption">激活按字节小端拼装（byte 0 落在 bit 0..7）；权重按位平铺。两者共用 in_valid/in_ready，在同一个上升沿同时消费，不能单独握手。</p>
 
   <div class="codeblock">
-    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:183-201 · 打包</span><span class="lang">C++</span></div>
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp · 打包</span><span class="lang">C++</span></div>
 <pre><code>const size_t block   = size_t(sent % blocks);
 const size_t channel = size_t(sent / blocks);
 const size_t offset  = block * 32;
@@ -1424,57 +1430,69 @@ core.weight_data = packed;</code></pre>
       </div>
     </div>
   </div>
-  <p class="stream-note"><code>B = K / 32</code>。每个通道的最后一拍同时拉高 <code>act_last</code> 与 <code>weight_last</code>。这里的 last 是<strong>通道边界</strong>，不是逻辑组边界；组边界由核心内部的 <code>cmd_group_div</code> 计数产生。</p>
+  <p class="stream-note"><code>B = K / 32</code>。输入无 last 信号；核心按每次 <code>in_valid &amp;&amp; in_ready</code> 推进计数。每 <code>B</code> 拍形成<strong>通道边界</strong>，每 <code>cmd_group_div</code> 拍形成逻辑组边界；尺寸仅在命令握手沿锁存。</p>
 
   <div class="callout green">
     <p><strong>为什么这个细节重要？</strong>如果只按 <code>K/32</code> 送数，只会算完一个输出通道。真实加速器通常会在设备侧缓存激活；当前这个核心明确把重放责任交给外层。README 也把“不要直接把重放变成重复主机上传”列为后续设备调度层要优化的事情。</p>
   </div>
 
   <div class="subhead"><span class="sn">6.3</span><h3>逐周期循环与握手</h3></div>
-  <p>桥接层的主循环可以概括为：准备本拍输入 → <code>eval()</code> → 采样握手 → <code>tick()</code> 推进一个 10 ns 周期。命令、输入、结果、完成四个通道都用 ready/valid 握手。</p>
+  <p>桥接层的主循环可以概括为：准备本拍输入 → <code>eval()</code> → 采样握手 → <code>tick()</code> 推进一个 10 ns 周期。只有命令、共用输入、结果三个 ready/valid 通道。核心状态为 IDLE → RUN（收数）→ DRAIN（等最后结果握手）→ IDLE；保留 status_idle/status_busy，最后结果握手的同一沿不能接新命令，下一上升沿才可接收。</p>
 
   <div class="table-wrap">
     <table class="handshake-table">
       <thead><tr><th>通道</th><th>桥接层动作</th><th>完成条件</th></tr></thead>
       <tbody>
-        <tr><td><code>cmd_valid/ready</code></td><td>写 <code>k_blocks/group_div/out_chans</code>，保持 valid 不撤销</td><td><code>cmd_valid &amp;&amp; cmd_ready</code> 同拍为 1</td></tr>
-        <tr><td><code>act_valid/ready</code><br><code>weight_valid/ready</code></td><td>按通道和 block 提供激活与权重；两路 valid 同起同落</td><td>两路同拍握手；单独一路握手视为协议错误</td></tr>
-        <tr><td><code>res_valid/ready</code></td><td><code>res_ready = 1</code>；校验组号、通道末标志、全局末标志</td><td>收满 <code>N × groups</code> 个 int32</td></tr>
-        <tr><td><code>done_valid/ready</code></td><td><code>done_ready = 1</code>；读取 <code>done_status</code></td><td>status=0，且发送/接收计数完全匹配</td></tr>
+        <tr><td><code>cmd_valid/cmd_ready</code></td><td>写 <code>cmd_k_blocks/cmd_group_div/cmd_out_chans</code>，保持 valid 不撤销</td><td><code>cmd_valid &amp;&amp; cmd_ready</code> 同拍为 1</td></tr>
+        <tr><td><code>in_valid/in_ready</code><br><code>act_data / weight_data</code></td><td>按通道和 block 配齐两个操作数；阻塞时保持 valid 和两份数据</td><td>一次共用握手同时接收激活和权重，无输入 last</td></tr>
+        <tr><td><code>res_valid/res_ready</code></td><td><code>res_ready = 1</code>；校验组号、通道末标志、全局末标志</td><td>唯一成功完成为 <code>res_valid &amp;&amp; res_ready &amp;&amp; res_last</code> 握手沿，且结果总数匹配</td></tr>
+        <tr><td><code>status_idle/status_busy</code></td><td><code>cmd_ready</code> 决定能否发命令；<code>status_idle/status_busy</code> 仅为状态输出，不是额外握手通道</td><td>RUN/DRAIN 为 busy，最后结果握手后回 IDLE，下一沿才可接新命令</td></tr>
       </tbody>
     </table>
   </div>
 
   <div class="codeblock">
-    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:180-232 · 主循环骨架（节选）</span><span class="lang">C++</span></div>
-<pre><code>for (uint64_t cycle = 0; cycle &lt; max_cycles; ++cycle) {
-    core.cmd_valid    = !accepted;
-    core.act_valid    = accepted &amp;&amp; sent &lt; input_beats;
-    core.weight_valid = core.act_valid;
-    if (core.act_valid) { <span class="c-com">/* 打包 32 个激活和 32 个权重位 */</span> }
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp · 主循环骨架（节选）</span><span class="lang">C++</span></div>
+<pre><code>uint64_t sent = 0, received = 0;
+bool accepted = false;
+core.res_ready = 1;
+for (uint64_t cycle = 0; cycle &lt; max_cycles; ++cycle) {
+    core.cmd_valid = !accepted;
+    core.in_valid = accepted &amp;&amp; sent &lt; input_beats;
+    if (core.in_valid) { <span class="c-com">/* 按 sent 打包两份数据；阻塞时 sent 不变 */</span> }
 
     core.eval();
     if (sim-&gt;context.gotFinish()) return recover(sim, BNN_EIO);
 
-    const bool cmd_fire    = core.cmd_valid &amp;&amp; core.cmd_ready;
-    const bool act_fire    = core.act_valid &amp;&amp; core.act_ready;
-    const bool weight_fire = core.weight_valid &amp;&amp; core.weight_ready;
-    if (act_fire != weight_fire) return recover(sim, BNN_EIO);
+    const bool cmd_fire = core.cmd_valid &amp;&amp; core.cmd_ready;
+    const bool in_fire = core.in_valid &amp;&amp; core.in_ready;
+    const bool res_fire = core.res_valid &amp;&amp; core.res_ready;
+    const bool task_complete = res_fire &amp;&amp; core.res_last;
 
-    if (core.res_valid &amp;&amp; core.res_ready) { <span class="c-com">/* 校验并收集 int32 */</span> }
-
-    const bool done = core.done_valid &amp;&amp; core.done_ready;
-    const unsigned status = core.done_status;
-    if (cmd_fire) accepted = true;
-    if (act_fire) ++sent;
-
-    sim-&gt;tick();
-
-    if (done) {
-        if (status != 0 || !accepted ||
-            sent != input_beats || received != result_count)
+    if (res_fire) { <span class="c-com">/* 校验并收集握手前的结果负载 */</span>
+        if (received &gt;= result_count ||
+            core.res_group_idx != received % groups ||
+            bool(core.res_chan_last) != (received % groups == groups - 1) ||
+            bool(core.res_last) != (received == result_count - 1))
             return recover(sim, BNN_EIO);
-        <span class="c-com">/* 撤销 valid，flush 波形，返回 BNN_OK */</span>
+        const uint32_t bits = core.res_data;
+        std::memcpy(output + size_t(received), &amp;bits, sizeof bits);
+        ++received;
+    }
+    if (cmd_fire) accepted = true;
+    if (in_fire) ++sent;
+
+    sim-&gt;tick(); // 上升沿实际执行已采样的握手
+
+    if (task_complete) {
+        if (!accepted || sent != input_beats || received != result_count || !core.cmd_ready)
+            return recover(sim, BNN_EIO);
+        <span class="c-com">/* 核心已回 IDLE；不在最后结果握手同沿发新命令 */</span>
+        core.cmd_valid = 0;
+        core.in_valid = 0;
+        core.eval();
+        sim-&gt;flush_trace();
+        return BNN_OK;
     }
 }
 return recover(sim, BNN_ETIMEOUT);</code></pre>
@@ -1483,7 +1501,7 @@ return recover(sim, BNN_ETIMEOUT);</code></pre>
   <div class="code-pair">
     <div>
       <div class="codeblock">
-        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:74-84 · tick()</span><span class="lang">C++</span></div>
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp · tick()</span><span class="lang">C++</span></div>
 <pre><code>if (trace) trace-&gt;dump(context.time());
 context.timeInc(5000);   <span class="c-com">// 5 ns</span>
 core-&gt;clock = 1;
@@ -1497,7 +1515,7 @@ core-&gt;eval();            <span class="c-com">// 低相位</span></code></pre>
     </div>
     <div>
       <div class="codeblock">
-        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:110-119 · 失败恢复</span><span class="lang">C++</span></div>
+        <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp · 失败恢复</span><span class="lang">C++</span></div>
 <pre><code>static BNN_Status recover(BNN_RtlSim* sim, BNN_Status status) noexcept {
     try {
         ContextScope scope(&amp;sim-&gt;context);
@@ -1509,7 +1527,7 @@ core-&gt;eval();            <span class="c-com">// 低相位</span></code></pre>
     return status;
 }</code></pre>
       </div>
-      <p class="code-caption">复位后模型回到 idle，下一个任务可以继续使用同一个设备。</p>
+      <p class="code-caption">复位后模型回到 idle，下一个任务可以继续使用同一个设备。核心无取消通知；外层必须清掉旧输入源并作废该任务已写出的部分结果，不能等待旧任务的 res_last。</p>
     </div>
   </div>
 
@@ -1517,11 +1535,11 @@ core-&gt;eval();            <span class="c-com">// 低相位</span></code></pre>
   <div class="error-cards">
     <div class="error-card">
       <h4>周期预算 <span class="k">timeout</span></h4>
-      <p>默认预算是 <code>input_beats + result_count + 64</code>。预算耗尽还没收到 <code>done</code>，桥接层复位模型并返回 <code>BNN_ETIMEOUT</code>。专项测试会故意传 <code>max_cycles=1</code> 触发超时，然后立刻再跑一个正常任务，确认恢复有效。</p>
+      <p>默认预算是 <code>input_beats + result_count + 64</code>。预算耗尽还没完成 <code>res_valid &amp;&amp; res_ready &amp;&amp; res_last</code> 握手，桥接层复位模型、作废部分输出并返回 <code>BNN_ETIMEOUT</code>。这是外层软件错误码，不是核心错误通道。专项测试会故意传 <code>max_cycles=1</code> 触发超时，然后立刻再跑一个正常任务，确认恢复有效。</p>
     </div>
     <div class="error-card">
       <h4>异常不穿过 C ABI <span class="k">noexcept</span></h4>
-      <p>桥接函数的边界不抛 C++ 异常：<code>std::bad_alloc</code> 映射为 <code>BNN_ENOMEM</code>，其他异常映射为 <code>BNN_EIO</code>。出错路径同样会复位模型，避免把半完成状态留给下一个任务。</p>
+      <p>桥接函数的边界不抛 C++ 异常：<code>std::bad_alloc</code> 映射为 <code>BNN_ENOMEM</code>，其他异常映射为 <code>BNN_EIO</code>。结果数量、组号或边界异常也由桥接层检测并报告；核心没有运行时错误码或结果错误位。恢复路径会复位模型，避免把半完成状态留给下一个任务。</p>
     </div>
     <div class="error-card">
       <h4>宿主上下文 <span class="k">ContextScope</span></h4>
@@ -1534,7 +1552,7 @@ core-&gt;eval();            <span class="c-com">// 低相位</span></code></pre>
   </div>
 
   <div class="codeblock">
-    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp:17-25 · 保存/恢复宿主 context</span><span class="lang">C++</span></div>
+    <div class="code-bar"><span class="lights"><i></i><i></i><i></i></span><span class="path">verilator-bnn-bridge.cpp · 保存/恢复宿主 context</span><span class="lang">C++</span></div>
 <pre><code>class ContextScope {
     VerilatedContext* previous;
 public:
@@ -1607,12 +1625,12 @@ make -C tests/trace test</code></pre>
       <h3>这些测试分别在证明什么</h3>
       <p><code>make -C tests/accelerator test</code> 会先构建 verilator 归档，再由脚本编译同一个 C 测试对象两次链接，比较输出字节；同时单独编译桥接测试和 context 测试。Python 脚本本身不调用 make，也不修改根目录的 <code>bnn-infer</code>。</p>
       <p><code>make -C tests/engine test</code> 复用原有引擎与 CLI 回归（MLP/CNN/GPT 的合成模型）；Llama 的合成模型与 KV Cache 一致性由 <code>make -C tests/llama test</code> 覆盖。</p>
-      <p><code>make -C tests/trace test</code> 检查波形开关、错误目录、任务后 flush、文件名避重和多设备隔离。</p>
+      <p><code>make -C tests/trace test</code> 检查波形开关、错误目录、任务后 flush、文件名避重和多设备隔离。核心非法配置由独立 assert 失败探针覆盖，检查非零、整除和 groups≤256；不再期待运行时错误完成。</p>
     </div>
   </div>
 
   <div class="callout green">
-    <p><strong>还可以直接看波形。</strong>用很小的任务生成 VCD，先在 GTKWave 里看 <code>clock/reset</code>、<code>cmd_valid/ready</code>、<code>act_valid/ready</code>、<code>weight_valid/ready</code>、<code>res_valid/ready</code>、<code>done_valid/status</code>，再展开内部流水级。完整模型的 VCD 可能很大，建议从 <code>K=128、N=2</code> 的测试开始。</p>
+    <p><strong>还可以直接看波形。</strong>用很小的任务生成 VCD，先在 GTKWave 里看 <code>clock/reset</code>、<code>cmd_valid/cmd_ready</code>、<code>in_valid/in_ready</code>、<code>act_data/weight_data</code>、<code>res_valid/res_ready/res_data/res_group_idx/res_chan_last/res_last</code>、<code>status_idle/status_busy</code>，再展开内部流水级。以最后结果握手沿判断成功完成，不仅看 res_last 置位。完整模型的 VCD 可能很大，建议从 <code>K=128、N=2</code> 的测试开始。</p>
   </div>
 
   <div class="codeblock">
@@ -1647,7 +1665,7 @@ gtkwave build/waves/bnn-core-XXXXXX.vcd</code></pre>
       <h3>用 ACCE=verilator，当……</h3>
       <ul>
         <li>你要验证 RTL 与公共 API 的接口、握手和结果顺序。</li>
-        <li>你想抓 VCD，逐周期观察命令、供数、结果和完成信号。</li>
+        <li>你想抓 VCD，逐周期观察命令、共用输入握手、结果和最后结果握手完成事件。</li>
         <li>你在改 <code>bnn-hw/bnn_core</code>，希望整条推理链路立刻跑起来。</li>
         <li>你能接受明显更慢的仿真速度，并且不需要 DMA/总线模型。</li>
       </ul>
@@ -1658,7 +1676,7 @@ gtkwave build/waves/bnn-core-XXXXXX.vcd</code></pre>
   <div class="limits">
     <div class="limit"><span class="x">×</span><div><strong>没有总线、DMA 和存储带宽模型。</strong>桥接层直接写模型端口，一拍送一对操作数；真实设备上的访存延迟、突发传输和带宽瓶颈都不在模型里。</div></div>
     <div class="limit"><span class="x">×</span><div><strong>没有设备侧激活缓存。</strong>每个输出通道都重放同一组激活，导致 <code>input_beats = (K/32) × N</code>。真实加速器应在本地缓存激活，避免重复主机上传。</div></div>
-    <div class="limit"><span class="x">×</span><div><strong>没有命令队列。</strong>核心是单在途任务；GEMM 的每一行都是一次独立命令，必须等上一行完成。吞吐不代表实际硬件。</div></div>
+    <div class="limit"><span class="x">×</span><div><strong>没有命令队列。</strong>核心是单在途任务；GEMM 的每一行都是一次独立命令，必须等上一行最后结果握手返回 IDLE，下一上升沿才能接命令，不支持同沿接新命令。吞吐不代表实际硬件。</div></div>
     <div class="limit"><span class="x">×</span><div><strong>RTL 只覆盖整数点积。</strong>FP16 scale 解码、乘法和有序 FP32 累加仍在 CPU，因此“上板后”的浮点后处理位置还需要在系统设计中重新决定。</div></div>
     <div class="limit"><span class="x">×</span><div><strong>不能在同一进程里运行时切换。</strong>两套实现导出同名符号，构建期只能选一个。想要对比，就构建两个可执行文件或两个归档，分别运行。</div></div>
     <div class="limit"><span class="x">×</span><div><strong>仿真时间不是性能。</strong>10 ns 是为了 VCD 可读性设定的仿真周期，与综合后的时序、面积、功耗无关。</div></div>
@@ -1712,7 +1730,7 @@ gtkwave build/waves/bnn-core-XXXXXX.vcd</code></pre>
     <div>
       <h4>说明</h4>
       <p>基于当前工作区实现整理，聚焦“bnn-accelerator 从软件后端切换到 Verilator 仿真后端”这一层。RTL 内部流水线与波形逐周期解读留到第二部分。</p>
-      <p class="stamp" style="margin-top:10px">2026-10-21 · BNN-train-infer · part 1 / 2</p>
+      <p class="stamp" style="margin-top:10px">2026-10-22 · BNN-train-infer · part 1 / 2</p>
     </div>
   </div>
 </footer>

@@ -98,7 +98,7 @@
               <button class="filter" data-filter="cmd" type="button">CMD</button>
               <button class="filter" data-filter="in" type="button">IN</button>
               <button class="filter" data-filter="res" type="button">RES</button>
-              <button class="filter" data-filter="done" type="button">DONE</button>
+              <button class="filter" data-filter="done" type="button" title="由最后一拍 RES 握手推导，非独立通道">END</button>
             </div>
             <button class="mini-btn" id="followBtn" type="button" title="播放时自动滚动事件列表">跟随 ON</button>
           </div>
@@ -150,8 +150,8 @@
     <div class="welcome-sub">BNN 顶层握手流观测台 <em>//</em> HANDSHAKE OBSERVATORY</div>
     <div class="welcome-art" aria-hidden="true">
       <div class="art-lane"><span>CMD</span><i style="--delay:0s"></i><i style="--delay:2.1s"></i></div>
-      <div class="art-lane"><span>ACT/WGT</span><i style="--delay:0.7s"></i><i style="--delay:2.8s"></i></div>
-      <div class="art-lane"><span>RES/DONE</span><i style="--delay:1.4s"></i><i style="--delay:3.5s"></i></div>
+      <div class="art-lane"><span>IN A/W</span><i style="--delay:0.7s"></i><i style="--delay:2.8s"></i></div>
+      <div class="art-lane"><span>RES/LAST</span><i style="--delay:1.4s"></i><i style="--delay:3.5s"></i></div>
       <div class="art-core">CORE</div>
     </div>
     <div class="welcome-drop">拖入 <b>.vcd</b> 波形文件</div>
@@ -161,7 +161,7 @@
     </div>
     <ul class="welcome-features">
       <li>流式扫描大文件，只保留 <b>bnn_core_top</b> 顶层端口</li>
-      <li>以握手成功为粒度还原 <b>CMD / ACT+WGT / RES / DONE</b></li>
+      <li>以握手成功为粒度还原 <b>CMD / IN（ACT+WGT）/ RES；END 由末 RES 握手推导</b></li>
       <li>不绘制逐周期波形，任务、密度时间线和性能摘要联动</li>
     </ul>
     <div class="welcome-foot">VCD · VERILATOR TRACE · LOCAL ONLY</div>

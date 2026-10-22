@@ -55,6 +55,10 @@ make -C tests/llama ACCE=verilator test
 该后端另需 Verilator（本地验证版本 5.032）和 C++17 编译器，产物为 `build/verilator/libbnn-engine.a`。
 不需要 cocotb、Python 虚拟环境或动态库加载。每个设备拥有独立模型，C++ 桥接层逐周期驱动命令、数据和结果握手；
 DOT_GROUPS 的整数结果直接来自 RTL，GEMV/GEMM 的 scale 和 FP32 组间累加在 C 中完成。
+核心在 `cmd_valid && cmd_ready` 的上升沿锁存三个尺寸并启动；`act_data/weight_data` 共用 `in_valid/in_ready`，输入边界由尺寸和握手计数推导，无输入 last。
+状态顺序为 `IDLE -> RUN -> DRAIN -> IDLE`，保留 `status_idle/status_busy`；唯一成功完成条件是 `res_valid && res_ready && res_last`，没有独立完成、取消或结果错误通道。
+最后结果握手沿不接新命令，返回 IDLE 后下一上升沿才可接收。配置合法性由外层保证，核心仅用仿真 assert 检查非零、整除和 `groups <= 256`，不返回运行时错误码。
+`reset` 为高有效同步复位，清空全部锁存配置、计数和数据有效位，置位期间屏蔽所有握手；无取消通知，外层须清理输入源并作废被复位任务的部分输出。详细接口见 [核心说明](bnn-hw/README.md)。
 两种后端具有相同的公共 API 和能力范围。仿真耗时不能代表实际硬件性能。
 
 静态归档包含 C 后端、C++ 桥接、RTL 模型及 Verilator 运行库对象。
@@ -93,8 +97,9 @@ BNN_RTL_TRACE_DIR="$PWD/build/model-waves" ./bnn-infer --profile --ref ref_logit
 ```
 
 建议先调试小型任务，完整模型的 VCD 可能很大。只在这条命令前设置变量即可；不设置该变量的后续运行仍关闭导出。
-GTKWave 中先查看 `clock/reset`、`cmd_valid/cmd_ready`、`act_valid/act_ready`、`weight_valid/weight_ready`、
-`res_valid/res_ready/res_data/res_group_idx/res_chan_last/res_last` 和 `done_valid/done_status`，再展开内部流水级。
+GTKWave 中先查看 `clock/reset`、`cmd_valid/cmd_ready`、`in_valid/in_ready`、`act_data/weight_data`、
+`res_valid/res_ready/res_data/res_group_idx/res_chan_last/res_last` 和 `status_idle/status_busy`，再展开内部流水级。
+以最后结果的 `res_valid && res_ready && res_last` 握手沿判断完成，不要只看输入送完或 res_last 置位。
 
 ### MNIST MLP / CNN
 
@@ -174,7 +179,7 @@ llama 测试还需要导出器所需依赖（可用 `PYTHON=/absolute/path/to/.v
 `make -C tests/engine ACCE=verilator test` 通过相同引擎/CLI 测试验证 RTL 接入。
 `make -C tests/accelerator test` 另行比较 soft 与 RTL 后端的整数及 FP32 输出字节，
 覆盖三种操作、步长和非对齐偏移、padding 保持、输入校验、资源归属、多设备隔离、桥接超时后恢复及宿主 Verilator 上下文保持。
-RTL 逐周期随机反压与中止测试仍由 `make -C bnn-hw/bnn_core_test test` 独立运行。
+RTL 共用输入停顿、逐周期随机输出反压、最后结果完成握手和复位恢复测试仍由 `make -C bnn-hw/bnn_core_test test` 独立运行；非法配置通过预期 assert 失败的独立探针验证。
 
 若要只运行某种模型，可以保留合成测试数据后直接调用 CLI，无需训练或下载：
 
