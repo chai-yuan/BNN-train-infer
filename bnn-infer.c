@@ -1,9 +1,10 @@
 /* Unified BNNE v2 demo: two task types, selected by the model file.
  * Classification (MLP/CNN): labeled dataset in, class predictions scored as accuracy.
- * LLM (GPT): prompt in, text out; --eval scores next-token prediction and --ref
- * compares logits against the Python export. --profile works for both tasks.
+ * LLM (GPT/Llama/Qwen3): prompt or token IDs in, text out; --eval scores next-token
+ * prediction and --ref compares logits against the Python export. --profile works for both tasks.
  * ./bnn-infer [--profile] [--ref FILE] model.bnn images.idx labels.idx
- * ./bnn-infer [--profile] [--ref FILE] [--eval FILE] [--prompt TEXT] [--steps N] model.bnn
+ * ./bnn-infer [--profile] [--ref FILE] [--eval FILE] [--prompt TEXT] [--ids FILE]
+ *             [--steps N] [--kv-cache] [--chat] [--tokenize-only] model.bnn
  */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
@@ -15,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "bnn-sw/bnn-engine.h"
 
@@ -23,9 +25,9 @@
 #define MAX_ITEMS 100000u
 
 typedef struct {
-    const char *ref, *eval, *prompt;
+    const char *ref, *eval, *prompt, *ids;
     uint32_t steps;
-    int profile, generate, count, kv_cache;
+    int profile, generate, count, kv_cache, chat, tokenize_only;
     const char* paths[3];
 } Args;
 
@@ -397,6 +399,60 @@ cleanup:
     return ok;
 }
 
+/* Whitespace-separated token IDs, e.g. output of llama-tokenize. */
+static int load_id_file(const char* path, int32_t* ids, uint32_t capacity, uint32_t vocabulary,
+                        uint32_t* out_count) {
+    FILE* file = open_file(path);
+    char* text = NULL;
+    long size = 0;
+    uint32_t count = 0;
+    int ok = 0;
+    if (!file)
+        return 0;
+    if (fseek(file, 0, SEEK_END) != 0 || (size = ftell(file)) < 0 ||
+        size > 64L * 1024L * 1024L) {
+        error("invalid --ids file");
+        goto cleanup;
+    }
+    rewind(file);
+    text = alloc_array((uint64_t)size + 1, 1);
+    if (!text || fread(text, 1, (size_t)size, file) != (size_t)size) {
+        error("cannot read --ids file");
+        goto cleanup;
+    }
+    text[size] = '\0';
+    for (char* p = text;;) {
+        while (*p && (unsigned char)*p <= (unsigned char)' ')
+            p++;
+        if (!*p)
+            break;
+        errno = 0;
+        char* end;
+        long value = strtol(p, &end, 10);
+        if (end == p || errno || value < 0 || value >= (long)vocabulary) {
+            error("invalid token ID in --ids file");
+            goto cleanup;
+        }
+        if (count == capacity) {
+            error("--ids file has more tokens than the model context length");
+            goto cleanup;
+        }
+        ids[count++] = (int32_t)value;
+        p = end;
+    }
+    if (!count) {
+        error("--ids file contains no token IDs");
+        goto cleanup;
+    }
+    *out_count = count;
+    ok = 1;
+cleanup:
+    free(text);
+    if (!close_file(file, path))
+        ok = 0;
+    return ok;
+}
+
 static int llm_forward(BNNE_Engine engine, int32_t* ids, uint32_t count, BNNE_Tensor* output) {
     BNNE_Tensor input = {{BNNE_I32, 1, {count}}, ids, (size_t)count * sizeof *ids};
     return api_ok(engine, BNNE_GetOutputDesc(engine, &input.desc, &output->desc),
@@ -451,22 +507,63 @@ static void append_id(int32_t* ids, uint32_t* count, uint32_t capacity, int32_t 
     ids[(*count)++] = id;
 }
 
-static int llm_generate(BNNE_Engine engine, const BNNE_ModelInfo* info, const Args* args,
-                        BNNE_Tensor* output) {
-    int32_t* ids = alloc_array(info->max_sequence_length, sizeof *ids);
-    uint32_t count = 0;
-    struct timespec start;
-    int ok = 0;
-    if (!ids || !phase_begin(engine, &start))
-        goto cleanup;
+static int build_chat_prompt(const char* prompt, char** out) {
+    const char* prefix = "<|im_start|>user\n";
+    const char* suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n";
+    size_t size = strlen(prefix) + strlen(prompt) + strlen(suffix) + 1;
+    char* text = malloc(size);
+    if (!text) {
+        error("out of memory");
+        return 0;
+    }
+    snprintf(text, size, "%s%s%s", prefix, prompt, suffix);
+    *out = text;
+    return 1;
+}
+
+static int encode_prompt(BNNE_Engine engine, const BNNE_ModelInfo* info, const Args* args,
+                         int32_t* ids, uint32_t capacity, uint32_t* out_count,
+                         const char** out_display) {
+    *out_count = 0;
+    *out_display = NULL;
+    if (args->ids)
+        return load_id_file(args->ids, ids, capacity, info->vocabulary_size, out_count);
+
     const char* prompt = args->prompt ? args->prompt : "春天";
+    *out_display = prompt;
+    if (info->kind == BNNE_MODEL_QWEN3) {
+        char* chat = NULL;
+        const char* text = prompt;
+        if (args->chat) {
+            if (!build_chat_prompt(prompt, &chat))
+                return 0;
+            text = chat;
+        }
+        BNNE_Status status = BNNE_Encode(engine, text, 1, ids, capacity, out_count);
+        free(chat);
+        if (status == BNNE_ERANGE) {
+            error("prompt exceeds the model context length");
+            return 0;
+        }
+        if (!api_ok(engine, status, "BNNE_Encode"))
+            return 0;
+        if (!*out_count) {
+            error("prompt encoded to zero tokens");
+            return 0;
+        }
+        return 1;
+    }
+    if (args->chat) {
+        error("--chat requires a Qwen3/GGUF model");
+        return 0;
+    }
     for (const char* p = prompt; *p;) {
         size_t best_length = 0;
         uint32_t best = 0;
         for (uint32_t id = 0; id < info->vocabulary_size; ++id) {
             const char* token;
             if (!api_ok(engine, BNNE_GetToken(engine, id, &token), "BNNE_GetToken"))
-                goto cleanup;
+                return 0;
             size_t length = strlen(token);
             if (length > best_length && strncmp(p, token, length) == 0) {
                 best = id;
@@ -475,16 +572,41 @@ static int llm_generate(BNNE_Engine engine, const BNNE_ModelInfo* info, const Ar
         }
         if (!best_length) {
             error("prompt contains text outside the vocabulary");
-            goto cleanup;
+            return 0;
         }
-        append_id(ids, &count, info->max_sequence_length, (int32_t)best);
+        if (*out_count >= capacity) {
+            error("prompt exceeds the model context length");
+            return 0;
+        }
+        append_id(ids, out_count, capacity, (int32_t)best);
         p += best_length;
     }
-    if (!count) {
+    if (!*out_count) {
         error("prompt must contain at least one token");
-        goto cleanup;
+        return 0;
     }
-    printf("generate: %s", prompt);
+    return 1;
+}
+
+static int llm_generate(BNNE_Engine engine, const BNNE_ModelInfo* info, const Args* args,
+                        BNNE_Tensor* output) {
+    int32_t* ids = alloc_array(info->max_sequence_length, sizeof *ids);
+    uint32_t count = 0;
+    struct timespec start;
+    int ok = 0;
+    if (!ids || !phase_begin(engine, &start))
+        goto cleanup;
+    const char* display = NULL;
+    if (!encode_prompt(engine, info, args, ids, info->max_sequence_length, &count, &display))
+        goto cleanup;
+    if (args->ids)
+        printf("generate ids: %" PRIu32 " tokens", count);
+    else
+        printf("generate: %s", display);
+    fflush(stdout);
+
+    uint32_t eos = 0;
+    int has_eos = BNNE_GetEosToken(engine, &eos) == BNNE_OK;
 
     if (args->kv_cache) {
         float* step_logits = alloc_array(info->vocabulary_size, sizeof *step_logits);
@@ -493,25 +615,36 @@ static int llm_generate(BNNE_Engine engine, const BNNE_ModelInfo* info, const Ar
 
         /* Prefill: 将 Prompt 注入 KV cache */
         BNNE_ResetKVCache(engine);
+        int progress = isatty(STDERR_FILENO) && count > 1;
         for (uint32_t i = 0; i < count; ++i) {
-            if (!api_ok(engine, BNNE_StepToken(engine, ids[i], i, step_logits), "BNNE_StepToken(prefill)")) {
+            BNNE_Status status = BNNE_StepToken(engine, ids[i], i, step_logits);
+            if (status != BNNE_OK) {
+                if (progress)
+                    fputc('\n', stderr);
+                api_ok(engine, status, "BNNE_StepToken(prefill)");
                 free(step_logits);
                 goto cleanup;
             }
+            if (progress)
+                fprintf(stderr, i == 0 ? "\nprefill %u/%u" : "\rprefill %u/%u",
+                        i + 1, count);
         }
+        if (progress)
+            fputc('\n', stderr);
 
         uint32_t next = argmax(step_logits, info->vocabulary_size);
-        const char* token;
-        if (!api_ok(engine, BNNE_GetToken(engine, next, &token), "BNNE_GetToken")) {
-            free(step_logits);
-            goto cleanup;
-        }
-        fputs(token, stdout);
-        append_id(ids, &count, info->max_sequence_length, (int32_t)next);
-
-        /* Decode: 增量自回归生成 */
-        for (uint32_t step = 1; step < args->steps; ++step) {
-            if (count >= info->max_sequence_length)
+        for (uint32_t step = 0; step < args->steps; ++step) {
+            if ((has_eos && next == eos) || BNNE_IsEogToken(engine, next))
+                break;
+            const char* token;
+            if (!api_ok(engine, BNNE_GetToken(engine, next, &token), "BNNE_GetToken")) {
+                free(step_logits);
+                goto cleanup;
+            }
+            fputs(token, stdout);
+            fflush(stdout);
+            append_id(ids, &count, info->max_sequence_length, (int32_t)next);
+            if (step + 1 >= args->steps || count >= info->max_sequence_length)
                 break;
             uint32_t pos = count - 1;
             if (!api_ok(engine, BNNE_StepToken(engine, (int32_t)next, pos, step_logits), "BNNE_StepToken(decode)")) {
@@ -519,12 +652,6 @@ static int llm_generate(BNNE_Engine engine, const BNNE_ModelInfo* info, const Ar
                 goto cleanup;
             }
             next = argmax(step_logits, info->vocabulary_size);
-            if (!api_ok(engine, BNNE_GetToken(engine, next, &token), "BNNE_GetToken")) {
-                free(step_logits);
-                goto cleanup;
-            }
-            fputs(token, stdout);
-            append_id(ids, &count, info->max_sequence_length, (int32_t)next);
         }
         free(step_logits);
     } else {
@@ -533,10 +660,13 @@ static int llm_generate(BNNE_Engine engine, const BNNE_ModelInfo* info, const Ar
                 goto cleanup;
             uint32_t next = argmax((const float*)output->data +
                                    (size_t)(count - 1) * info->vocabulary_size, info->vocabulary_size);
+            if ((has_eos && next == eos) || BNNE_IsEogToken(engine, next))
+                break;
             const char* token;
             if (!api_ok(engine, BNNE_GetToken(engine, next, &token), "BNNE_GetToken"))
                 goto cleanup;
             fputs(token, stdout);
+            fflush(stdout);
             append_id(ids, &count, info->max_sequence_length, (int32_t)next);
         }
     }
@@ -548,14 +678,30 @@ cleanup:
 }
 
 static int llm_check(const BNNE_ModelInfo* info) {
-    if ((info->kind != BNNE_MODEL_GPT && info->kind != BNNE_MODEL_LLAMA) ||
+    if ((info->kind != BNNE_MODEL_GPT && info->kind != BNNE_MODEL_LLAMA &&
+         info->kind != BNNE_MODEL_QWEN3) ||
         info->input.dtype != BNNE_I32 || info->input.rank != 1 ||
         !info->max_sequence_length || !info->vocabulary_size ||
         info->vocabulary_size > INT32_MAX || info->input.dims[0] != info->max_sequence_length ||
         info->output.dtype != BNNE_F32 || info->output.rank != 2 ||
         info->output.dims[0] != info->max_sequence_length ||
         info->output.dims[1] != info->vocabulary_size)
-        return error("LLM task expects a GPT/LLaMA model with int32 [T] input and FP32 [T,V] output");
+        return error("LLM task expects a GPT/LLaMA/Qwen3 model with int32 [T] input and FP32 [T,V] output");
+    return 1;
+}
+
+static int ensure_output(BNNE_Tensor* output, uint64_t elements) {
+    if (elements > SIZE_MAX / sizeof(float))
+        return error("invalid output tensor size");
+    size_t bytes = (size_t)elements * sizeof(float);
+    if (output->data && output->bytes >= bytes)
+        return 1;
+    float* data = alloc_array(elements, sizeof(float));
+    if (!data)
+        return 0;
+    free(output->data);
+    output->data = data;
+    output->bytes = bytes;
     return 1;
 }
 
@@ -564,29 +710,39 @@ static int llm_task(BNNE_Engine engine, const BNNE_ModelInfo* info, const Args* 
     BNNE_Tensor output = {info->output, NULL, 0};
     struct timespec start;
     int result = 1, mismatch = 0;
-    uint64_t elements = (uint64_t)info->max_sequence_length * info->vocabulary_size;
+    uint64_t V = info->vocabulary_size;
     if (!llm_check(info))
         return result;
-    output.data = alloc_array(elements, sizeof(float));
-    if (!output.data)
-        goto cleanup;
-    output.bytes = (size_t)elements * sizeof(float);
     if (args->ref) {
         Comparison comparison = {0};
-        if (!load_ref(args->ref, info->max_sequence_length, info->vocabulary_size, 1, &ref) ||
+        if (!load_ref(args->ref, info->max_sequence_length, info->vocabulary_size, 1, &ref))
+            goto cleanup;
+        if (!ensure_output(&output, (uint64_t)ref.count * V) ||
             !phase_begin(engine, &start) || !llm_forward(engine, ref.ids, ref.count, &output))
             goto cleanup;
         for (uint32_t i = 0; i < ref.count; ++i)
-            compare_row(&comparison, (const float*)output.data + (size_t)i * info->vocabulary_size,
-                        ref.logits + (size_t)i * info->vocabulary_size, info->vocabulary_size);
+            compare_row(&comparison, (const float*)output.data + (size_t)i * V,
+                        ref.logits + (size_t)i * V, info->vocabulary_size);
         mismatch = report_comparison(&comparison, ref.count, 1e-2, 1);
         if (!phase_end(engine, &start, "check", args->profile))
             goto cleanup;
     }
-    if (args->eval && !llm_eval(engine, info, args->eval, &output, args->profile))
-        goto cleanup;
-    if (args->generate && !llm_generate(engine, info, args, &output))
-        goto cleanup;
+    if (args->eval) {
+        if (info->kind == BNNE_MODEL_QWEN3) {
+            error("--eval is not supported for Qwen3 yet; use --ref with a token-ID file");
+            goto cleanup;
+        }
+        if (!ensure_output(&output, (uint64_t)info->max_sequence_length * V) ||
+            !llm_eval(engine, info, args->eval, &output, args->profile))
+            goto cleanup;
+    }
+    if (args->generate) {
+        if (!args->kv_cache && info->kind != BNNE_MODEL_QWEN3 &&
+            !ensure_output(&output, (uint64_t)info->max_sequence_length * V))
+            goto cleanup;
+        if (!llm_generate(engine, info, args, &output))
+            goto cleanup;
+    }
     result = mismatch;
 cleanup:
     free(ref.ids);
@@ -603,13 +759,19 @@ static int parse_args(int argc, char** argv, Args* args) {
             args->profile = 1;
         } else if (strcmp(option, "--kv-cache") == 0 && !args->kv_cache) {
             args->kv_cache = 1;
+        } else if (strcmp(option, "--chat") == 0 && !args->chat) {
+            args->chat = 1;
+        } else if (strcmp(option, "--tokenize-only") == 0 && !args->tokenize_only) {
+            args->tokenize_only = 1;
         } else if ((strcmp(option, "--ref") == 0 && !args->ref) ||
                    (strcmp(option, "--eval") == 0 && !args->eval) ||
-                   (strcmp(option, "--prompt") == 0 && !args->prompt)) {
+                   (strcmp(option, "--prompt") == 0 && !args->prompt) ||
+                   (strcmp(option, "--ids") == 0 && !args->ids)) {
             if (++i == argc)
                 return error("option requires a value");
             if (strcmp(option, "--ref") == 0) args->ref = argv[i];
             else if (strcmp(option, "--eval") == 0) args->eval = argv[i];
+            else if (strcmp(option, "--ids") == 0) { args->ids = argv[i]; args->generate = 1; }
             else { args->prompt = argv[i]; args->generate = 1; }
         } else if (strcmp(option, "--steps") == 0 && !steps_set) {
             if (++i == argc)
@@ -658,19 +820,48 @@ int main(int argc, char** argv) {
         error("incompatible BNNE API version");
         goto cleanup;
     }
-    llm = info.kind == BNNE_MODEL_GPT || info.kind == BNNE_MODEL_LLAMA;
+    llm = info.kind == BNNE_MODEL_GPT || info.kind == BNNE_MODEL_LLAMA ||
+          info.kind == BNNE_MODEL_QWEN3;
     if (args.count != (llm ? 1 : 3)) {
-        error(llm ? "LLM task expects only the model path; use --ref/--eval/--prompt"
+        error(llm ? "LLM task expects only the model path; use --ref/--eval/--prompt/--ids"
                   : "classification expects model.bnn images.idx labels.idx");
         goto usage;
     }
     if (llm && !args.ref && !args.eval)
         args.generate = 1;
+    if (llm && info.kind == BNNE_MODEL_QWEN3 && args.generate)
+        args.kv_cache = 1;
     if (args.profile) {
         BNNE_Stats stats;
         if (!api_ok(engine, BNNE_GetStats(engine, &stats), "BNNE_GetStats"))
             goto cleanup;
         printf("profile load: %.3f ms\n", (double)stats.load_ns / 1e6);
+    }
+    if (args.tokenize_only) {
+        if (!llm) {
+            error("--tokenize-only requires an LLM model");
+            goto cleanup;
+        }
+        if (!args.prompt && !args.ids) {
+            error("--tokenize-only requires --prompt or --ids");
+            goto cleanup;
+        }
+        int32_t* ids = alloc_array(info.max_sequence_length, sizeof *ids);
+        uint32_t count = 0;
+        const char* display = NULL;
+        if (!ids)
+            goto cleanup;
+        if (!encode_prompt(engine, &info, &args, ids, info.max_sequence_length, &count, &display)) {
+            free(ids);
+            goto cleanup;
+        }
+        printf("token ids: %" PRIu32 ":", count);
+        for (uint32_t i = 0; i < count; ++i)
+            printf(" %d", ids[i]);
+        putchar('\n');
+        free(ids);
+        result = 0;
+        goto cleanup;
     }
     result = llm ? llm_task(engine, &info, &args) : classify_task(engine, &info, &args);
     goto cleanup;
@@ -678,7 +869,8 @@ usage:
     fprintf(stderr,
             "usage: %s [--profile] [--ref FILE] model.bnn images.idx labels.idx\n"
             "       %s [--profile] [--ref FILE] [--eval FILE] [--prompt TEXT] "
-            "[--steps N] [--kv-cache] model.bnn\n", argv[0], argv[0]);
+            "[--ids FILE] [--steps N] [--kv-cache] [--chat] [--tokenize-only] model.bnn\n",
+            argv[0], argv[0]);
 cleanup:
     BNNE_Close(engine);
     return result;

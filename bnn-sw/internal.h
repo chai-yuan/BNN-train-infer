@@ -16,6 +16,10 @@ typedef struct {
     BNNE_Status (*step)(BNNE_Engine engine, int32_t token, uint32_t pos,
                         float* out_logits, BNNE_Stats* stats);
     BNNE_Status (*reset_cache)(BNNE_Engine engine);
+    BNNE_Status (*eos)(BNNE_Engine engine, uint32_t* out_id);
+    BNNE_Status (*encode)(BNNE_Engine engine, const char* text, int parse_special,
+                          int32_t* ids, uint32_t capacity, uint32_t* out_count);
+    int (*is_eog)(BNNE_Engine engine, uint32_t id);
 } BNNE_ModelOps;
 
 struct bnne_engine {
@@ -40,6 +44,7 @@ extern const BNNE_ModelOps bnne_mlp_ops;
 extern const BNNE_ModelOps bnne_cnn_ops;
 extern const BNNE_ModelOps bnne_gpt_ops;
 extern const BNNE_ModelOps bnne_llama_ops;
+extern const BNNE_ModelOps bnne_qwen3_ops;
 
 BNNE_Status bnne_error(BNNE_Engine engine, BNNE_Status status, const char* format, ...);
 BNNE_Status bnne_accel_status(BNNE_Engine engine, BNN_Status status, const char* operation);

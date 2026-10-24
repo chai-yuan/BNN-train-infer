@@ -18,7 +18,10 @@ typedef enum {
     BNNE_ERANGE = -4, BNNE_EIO = -5, BNNE_EFORMAT = -6, BNNE_ECOMPUTE = -7
 } BNNE_Status;
 typedef enum { BNNE_F32 = 1, BNNE_I32 = 2 } BNNE_DType;
-typedef enum { BNNE_MODEL_MLP = 1, BNNE_MODEL_CNN = 2, BNNE_MODEL_GPT = 3, BNNE_MODEL_LLAMA = 4 } BNNE_ModelKind;
+typedef enum {
+    BNNE_MODEL_MLP = 1, BNNE_MODEL_CNN = 2, BNNE_MODEL_GPT = 3,
+    BNNE_MODEL_LLAMA = 4, BNNE_MODEL_QWEN3 = 5
+} BNNE_ModelKind;
 
 typedef struct {
     BNNE_DType dtype;
@@ -79,8 +82,20 @@ BNNE_Status BNNE_GetOutputDesc(BNNE_Engine engine, const BNNE_TensorDesc* input,
  * 参数检查失败不修改输出；计算失败时输出内容不作保证。
  */
 BNNE_Status BNNE_Run(BNNE_Engine engine, const BNNE_Tensor* input, BNNE_Tensor* output);
-/* 仅 GPT/Llama 支持，返回 NUL 结尾的借用 UTF-8 字符串，直到 Close 有效，不得 free。 */
+/* 仅 GPT/Llama/Qwen3 支持，返回 NUL 结尾的借用 UTF-8 字符串，直到 Close 有效，不得 free。 */
 BNNE_Status BNNE_GetToken(BNNE_Engine engine, uint32_t id, const char** out_text);
+/* 返回模型的 EOS token ID；模型未声明 EOS 时返回 BNNE_ENOTSUP。 */
+BNNE_Status BNNE_GetEosToken(BNNE_Engine engine, uint32_t* out_id);
+/*
+ * 将 UTF-8 文本编码为 token IDs。仅带文本分词器的模型（当前为 GGUF/Qwen3）支持，
+ * 其他模型返回 BNNE_ENOTSUP。
+ * parse_special != 0 时识别 <|im_start|> 等控制/用户自定义 token 字面量。
+ * capacity 不足时返回 BNNE_ERANGE，部分写入的 ID 不作保证。
+ */
+BNNE_Status BNNE_Encode(BNNE_Engine engine, const char* text, int parse_special,
+                        int32_t* ids, uint32_t capacity, uint32_t* out_count);
+/* 判断 token 是否应结束生成（EOS/EOG）。其他模型或无声明时返回 0。 */
+int BNNE_IsEogToken(BNNE_Engine engine, uint32_t id);
 /* 重置或清空当前引擎的 KV Cache 状态。清空后，下次调用解码时从 pos=0 开始。 */
 BNNE_Status BNNE_ResetKVCache(BNNE_Engine engine);
 /* 步骤式单 token 解码（KV Cache 模式）：

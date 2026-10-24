@@ -45,7 +45,8 @@ BUILD_DIR := build/$(ACCE)
 
 ENGINE_SOURCES := bnn-sw/bnn-engine.c bnn-sw/common.c bnn-sw/runtime.c \
                   bnn-sw/model-mlp.c bnn-sw/model-cnn.c bnn-sw/model-gpt.c \
-                  bnn-sw/model-llama.c
+                  bnn-sw/model-llama.c bnn-sw/gguf.c bnn-sw/tokenizer-bpe.c \
+                  bnn-sw/model-qwen3.c
 ACCEL_SOURCE := bnn-accelerator/$(ACCE)-bnn-accelerator.c
 
 ENGINE_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ENGINE_SOURCES:.c=.o) $(ACCEL_SOURCE:.c=.o))

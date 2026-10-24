@@ -10,7 +10,10 @@
 目前提供 **C 软件模拟后端和 Verilator RTL 仿真后端**，可以让现有推理链路执行 W1A8 计算核心；尚未接入实际 FPGA/ASIC 设备。
 
 - 已支持 MNIST MLP、MNIST CNN、nanoGPT 以及 Llama-2 的训练导出及 C 推理。
-- 已将模型统一定义在 `bnn-sw`，使用不透明 `BNNE_Engine` 句柄和 `bnn-infer` 演示入口（支持 GPT1 与 LMA1 两类 LLM 格式）。
+- 新增 GGUF/Qwen3 软件后端：可直接加载 `Bonsai-1.7B-Q1_0.gguf` 的 Q1_0 权重，
+  已打通 Qwen3 前向、KV Cache、参考 logits 差分、Qwen2 byte-level BPE 分词器、
+  chat 模板与端到端 `--prompt` 生成。
+- 已将模型统一定义在 `bnn-sw`，使用不透明 `BNNE_Engine` 句柄和 `bnn-infer` 演示入口（支持 GPT1、LMA1 与 GGUF/Qwen3 三类 LLM 格式）。
 - 二值矩阵计算统一通过 `bnn-accelerator.h`；可选择 C 软件实现或 Verilator RTL 仿真。
 - 已提供 Python logits 正确性校验与分阶段性能统计，不再维护新引擎内的独立参考内核。
 - 已通过合成模型数值回归、错误路径、多句柄隔离及内存检查；现有小型 GPT 模型已通过 Python reference 校验。
@@ -24,10 +27,11 @@ logits 校验与性能统计是两类任务共用的选项。
 ```text
 train-*-export.py       Python 训练、模型导出和参考数据生成
 bnn-infer.c            统一演示入口：分类与文本生成两类任务，附校验与统计
-bnn-sw/                BNNE 引擎、模型加载、工作区和前向实现
+bnn-sw/                BNNE 引擎、模型加载、工作区和前向实现（含 GGUF/Qwen3 后端）
 bnn-accelerator/       设备级公共接口、soft/Verilator 后端及 C ABI 仿真桥接
-tests/                 分类回归测试（engine / llama / accelerator / trace）
-doc/                   引擎接口及 BNN1、GPT1 文件格式说明
+tests/                 分类回归测试（engine / llama / qwen3 / accelerator / trace）
+tools/                 GGUF 参考实现等辅助脚本
+doc/                   引擎接口及 BNN1、GPT1、LMA1、Qwen3-GGUF 格式说明
 bnn-hw/                SystemVerilog 计算核心、核心自检测试及接口说明
 ```
 
@@ -134,6 +138,39 @@ CNN 将模型路径替换为 `model-cnn.bnn`，并使用对应的 reference 文�
 只指定 `--ref` 或 `--eval` 不会自动生成文本；没有指定任何任务时默认从“春天”生成 40 个 token。
 模型、reference、tokens 必须配套使用。任何文件、推理或正确性校验失败均返回非零退出码。
 
+### GGUF / Qwen3（Bonsai-1.7B-Q1_0）
+
+`BNNE_Open` 通过 `GGUF` magic 识别 Qwen3 模型，Q1_0 权重直接映射到加速器的 W1
+（每组 128 个 ±1 权重 + FP16 scale）。C 端已接入 Qwen2 byte-level BPE 分词器，
+可直接用 `--prompt` 生成；`--chat` 使用 GGUF 模板的单条 user 消息与空 think 块：
+
+```bash
+# 原始续写
+./bnn-infer --profile --prompt "The capital of France is" --steps 4 \
+    Bonsai-1.7B-Q1_0.gguf
+
+# Qwen3 chat 模板
+./bnn-infer --profile --chat --prompt "What is the capital of France?" --steps 4 \
+    Bonsai-1.7B-Q1_0.gguf
+
+# 只分词，便于与 llama-tokenize 对拍
+./bnn-infer --tokenize-only --prompt "The capital of France is" \
+    Bonsai-1.7B-Q1_0.gguf
+# token ids: 5: 785 6722 315 9625 374
+```
+
+调试时仍可用 `--ids` 直接传入 token IDs。同时提供 NumPy 参考实现，按与 C 相同的
+W1A8 量化语义生成 `--ref` 文件：
+
+```bash
+python3 tools/bonsai-ref.py --model Bonsai-1.7B-Q1_0.gguf \
+    --ids '785 6722 315 9625 374' --out /tmp/ref-bonsai.bin
+./bnn-infer --profile --ref /tmp/ref-bonsai.bin Bonsai-1.7B-Q1_0.gguf
+```
+
+分词器在不同文本上与 `llama-tokenize` 逐 ID 一致（见 `tests/qwen3/test_tokenizer.py`）。
+详细格式、分块策略与数值差分见 [Qwen3-GGUF 说明](doc/qwen3-gguf.md)。
+
 ### 训练与导出
 
 Python 训练需要 `torch`、`numpy`，MNIST 另外需要 `torchvision`。
@@ -165,9 +202,13 @@ make -C tests/engine ACCE=verilator test
 make -C tests/llama test
 make -C tests/accelerator test
 make -C tests/trace test
+
+# Qwen3 差分测试需要外部 GGUF 模型
+make -C tests/qwen3 test BONSAI_GGUF=/path/to/Bonsai-1.7B-Q1_0.gguf
 ```
 
 `tests/` 按类别拆分：`engine/` 覆盖 MLP/CNN/GPT、引擎 API 与 CLI；`llama/` 覆盖 Llama 导出、评测、生成和 KV Cache；
+`qwen3/` 用 NumPy 同量化参考差分 GGUF/Qwen3 前向，并与 `llama-tokenize` 对拍分词器；
 `accelerator/` 覆盖加速器 API、软/硬件差分、桥接与宿主 context；`trace/` 覆盖可选的 VCD 波形。
 engine/llama 的 Makefile 会先构建所选后端；accelerator/trace 固定构建 `ACCE=verilator`。
 每个分类目录的 `README.md` 说明了测试内容、依赖、覆盖范围和选项。
@@ -217,13 +258,23 @@ MLP 合成标签故意放入两个错误类别，正常结果是 6/8；这里应
 当前软件设备的 group 为 128，最大输入和输出维度均为 4096。
 CNN 按逐组补齐后的尺寸检查；GPT 要求 head size=128、`4*C <= 4096` 且词表不大于 4096。
 仓库已有的 `nanogpt-lib.bnn` 可运行；`nanogpt_l3_b48.bnn` 的词表为 6362，当前会返回不支持。
-暂不提供矩阵分块、异步调度、KV cache 或多种采样策略，优先保持实现简单。
+现有 GPT 路径暂不提供矩阵分块、异步调度或多种采样策略，优先保持实现简单。
+
+GGUF/Qwen3 后端在模型层把 6144 维 FFN 和 151669 维 lm_head 分块到 4096 以内，
+因此设备能力上限不变。当前限制：
+
+- 运行期上下文固定为 1024；`--eval`、采样策略和更长上下文尚未实现。
+- `--chat` 只实现单条 user 消息模板，没有 system/tools/多轮历史。
+- 生成固定贪心；`<|im_end|>` 与 `<|endoftext|>` 都会停止。
+- 速度不是当前目标：单线程约 6.1 s/token，未启用 OpenMP/SIMD。
+- 分块与前向只在 `ACCE=soft` 上验证；RTL 后端结构上可分块执行，但 1.7B 仿真不实用。
 
 后续按以下顺序推进：
 
-1. 用配套训练模型与真实数据建立精度、延迟、传输量和补齐开销基线。
-2. 根据测量结果确定硬件的分组、矩阵规模、缓冲及传输能力，再决定是否需要分块等扩展。
-3. 实现硬件后端，复用现有 accelerator 接口和 Python reference 完成验证，再做针对性优化。
+1. 按需补齐 `--eval`、采样策略和更长上下文，并评估 chat 的多轮/system/tools 模板。
+2. 用真实数据建立精度基线；软件后端速度不作为最终执行指标。
+3. 根据测量结果确定硬件的分组、矩阵规模、缓冲及传输能力，再决定是否需要分块等扩展。
 
 嵌入调用、张量与所有权约定见 [BNNE 引擎说明](doc/bnn-engine.md)；
-格式说明见 [BNN1](doc/bnn-file.md)、[GPT1](doc/gpt-file.md) 和 [LMA1](doc/llama-file.md)。
+格式说明见 [BNN1](doc/bnn-file.md)、[GPT1](doc/gpt-file.md)、[LMA1](doc/llama-file.md)
+和 [Qwen3-GGUF](doc/qwen3-gguf.md)。

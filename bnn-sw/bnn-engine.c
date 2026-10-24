@@ -52,6 +52,8 @@ BNNE_Status BNNE_Open(const char* model_path, const BNNE_Options* options, BNNE_
             engine->ops = &bnne_gpt_ops;
         else if (memcmp(magic, "LMA1", 4) == 0)
             engine->ops = &bnne_llama_ops;
+        else if (memcmp(magic, "GGUF", 4) == 0)
+            engine->ops = &bnne_qwen3_ops;
         status = engine->ops ? engine->ops->load(engine, file) : BNNE_ENOTSUP;
     }
     if (fclose(file) != 0 && status == BNNE_OK)
@@ -89,7 +91,8 @@ BNNE_Status BNNE_GetOutputDesc(BNNE_Engine engine, const BNNE_TensorDesc* input,
                               BNNE_TensorDesc* out_output) {
     if (!engine || !input || !out_output)
         return BNNE_EINVAL;
-    if (engine->info.kind == BNNE_MODEL_GPT || engine->info.kind == BNNE_MODEL_LLAMA) {
+    if (engine->info.kind == BNNE_MODEL_GPT || engine->info.kind == BNNE_MODEL_LLAMA ||
+        engine->info.kind == BNNE_MODEL_QWEN3) {
         if (input->dtype != BNNE_I32 || input->rank != 1 || input->dims[0] == 0 ||
             input->dims[0] > engine->info.max_sequence_length)
             return bnne_error(engine, BNNE_EINVAL, "LLM input must be I32 [n], 1 <= n <= context length");
@@ -181,6 +184,32 @@ BNNE_Status BNNE_GetToken(BNNE_Engine engine, uint32_t id, const char** out_text
     if (id >= engine->info.vocabulary_size)
         return BNNE_ERANGE;
     return engine->ops->token(engine, id, out_text);
+}
+
+BNNE_Status BNNE_GetEosToken(BNNE_Engine engine, uint32_t* out_id) {
+    if (!engine || !out_id)
+        return BNNE_EINVAL;
+    if (!engine->ops || !engine->ops->eos)
+        return BNNE_ENOTSUP;
+    return engine->ops->eos(engine, out_id);
+}
+
+BNNE_Status BNNE_Encode(BNNE_Engine engine, const char* text, int parse_special,
+                        int32_t* ids, uint32_t capacity, uint32_t* out_count) {
+    if (!engine || !text || !ids || !out_count || capacity == 0)
+        return BNNE_EINVAL;
+    *out_count = 0;
+    if (!engine->ops || !engine->ops->encode)
+        return BNNE_ENOTSUP;
+    return engine->ops->encode(engine, text, parse_special, ids, capacity, out_count);
+}
+
+int BNNE_IsEogToken(BNNE_Engine engine, uint32_t id) {
+    if (!engine || id >= engine->info.vocabulary_size)
+        return 0;
+    if (!engine->ops || !engine->ops->is_eog)
+        return 0;
+    return engine->ops->is_eog(engine, id);
 }
 
 BNNE_Status BNNE_ResetKVCache(BNNE_Engine engine) {

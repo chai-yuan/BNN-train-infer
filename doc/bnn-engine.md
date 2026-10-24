@@ -92,17 +92,30 @@ OptionsInit → Open → GetModelInfo → GetOutputDesc → Run（可重复）�
 | CNN | FP32 CHW `[1,28,28]` | FP32 `[out_features]` |
 | GPT | int32 `[n]`，`1 <= n <= T` | FP32 `[n,V]` |
 | LLaMA | int32 `[n]`，`1 <= n <= T` | FP32 `[n,V]` |
+| Qwen3 (GGUF) | int32 `[n]`，`1 <= n <= T` | FP32 `[n,V]` |
+
+Qwen3 通过 `GGUF` magic 自动识别；权重按 4096 以内分块上传，因此设备维度上限不变。
+文本可用 `BNNE_Encode` 编码为 token IDs（CLI 的 `--prompt` / `--chat`），也可用
+`--ids` 直接传入；词表解码由 `GetToken` 完成。
 
 ### KV Cache 与自回归单步解码
 
-针对生成式语言模型（GPT 与 LLaMA），引擎提供增量单步解码接口：
+针对生成式语言模型（GPT、LLaMA 与 Qwen3），引擎提供增量单步解码接口：
 - `BNNE_ResetKVCache(engine)`：重置当前模型的 KV Cache 游标。
 - `BNNE_StepToken(engine, token, pos, out_logits)`：单步解码。将当前 `token` 在位置 `pos` 的 Key 与 Value 写入缓存，Query 仅与缓存中的历史 Key（位置 `0..pos`）进行注意力计算，输出当前位置的 `out_logits`（长度 `[V]`）。
 - CLI 工具 `bnn-infer` 支持 `--kv-cache` 开关。开启后，Prefill 阶段将 Prompt 顺序注入缓存，Decode 阶段进行单步增量计算，将自回归解码算力与带宽开销大幅降低，且与全上下文重计算保持严格数值一致。
 
 GPT `GetModelInfo` 中的 input/output 描述是最大序列长度；实际序列由 `GetOutputDesc` 查询。
-IDs 须满足 `0 <= id < V`。`GetToken` 返回 GPT 词表的借用 NUL 结尾 UTF-8 字符串，直到 Close 有效。
-引擎不承担图像归一化、字符串分词、采样或数据集读取。
+IDs 须满足 `0 <= id < V`。`GetToken` 返回 GPT/LLaMA/Qwen3 词表的借用 NUL 结尾 UTF-8 字符串，直到 Close 有效。
+`GetEosToken` 返回模型声明的 EOS ID；未声明时返回 `BNNE_ENOTSUP`。
+`BNNE_IsEogToken(engine, id)` 判断 token 是否应结束生成；Qwen3 同时覆盖
+`<|im_end|>`（元数据 EOS）与 `<|endoftext|>`。其他模型默认返回 0。
+`BNNE_Encode(engine, text, parse_special, ids, capacity, out_count)` 把 UTF-8 文本
+编码为 token IDs；当前仅 GGUF/Qwen3 实现，其他模型返回 `BNNE_ENOTSUP`。
+`parse_special` 非零时识别 `<|im_start|>` 等控制/用户自定义 token 字面量。
+Qwen3 的 `StepToken` 要求位置连续（`pos=0` 会重置缓存），以增量方式写 KV Cache。
+引擎不承担图像归一化、采样或数据集读取；Qwen3 文本分词由 `BNNE_Encode` 提供，
+其他模型的字符串分词仍由应用负责。
 
 输入类型、形状、容量、对齐、有限值或 token ID 检查失败不修改输出，也不累计统计。
 计算错误返回状态码；库不会打印报告或终止进程。
