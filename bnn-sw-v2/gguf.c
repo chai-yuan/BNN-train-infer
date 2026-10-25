@@ -2,8 +2,10 @@
 
 #include "gguf.h"
 
+#include "bnne-internal.h"
+
+#include <fcntl.h>
 #include <math.h>
-#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -22,15 +24,6 @@ typedef struct {
     const uint8_t* end;
     int ok;
 } Cursor;
-
-static void set_error(char* error, size_t size, const char* format, ...) {
-    if (!error || !size)
-        return;
-    va_list args;
-    va_start(args, format);
-    vsnprintf(error, size, format, args);
-    va_end(args);
-}
 
 static uint8_t read_u8(Cursor* c) {
     if (!c->ok || c->p >= c->end) {
@@ -69,10 +62,10 @@ static double read_f64(Cursor* c) {
     return value;
 }
 
-static BnneGgufString read_string(Cursor* c) {
-    BnneGgufString s = {NULL, 0};
+static bnne_gguf_string read_string(Cursor* c) {
+    bnne_gguf_string s = {NULL, 0};
     uint64_t length = read_u64(c);
-    if (!c->ok || length > (uint64_t)(c->end - c->p)) {
+    if (!c->ok || length > UINT32_MAX || length > (uint64_t)(c->end - c->p)) {
         c->ok = 0;
         return s;
     }
@@ -136,7 +129,7 @@ static int float_value(Cursor* c, uint32_t type, float* out) {
     return c->ok && isfinite(*out);
 }
 
-static int copy_string(const BnneGgufString* s, char* dst, size_t size) {
+static int copy_string(const bnne_gguf_string* s, char* dst, size_t size) {
     if (size == 0)
         return 0;
     size_t length = s->length < size - 1 ? s->length : size - 1;
@@ -145,21 +138,59 @@ static int copy_string(const BnneGgufString* s, char* dst, size_t size) {
     return 1;
 }
 
-static int key_is(const BnneGgufString* key, const char* name) {
+static int key_is(const bnne_gguf_string* key, const char* name) {
     size_t length = strlen(name);
     return key->length == length && memcmp(key->data, name, length) == 0;
 }
 
-static BNNE_Status read_token_array(Cursor* c, uint32_t type, BnneGgufString** out,
+static int mlp_activation_key(const bnne_gguf_string* key, uint32_t* out_index) {
+    static const char prefix[] = "bnn-mlp.block.";
+    static const char suffix[] = ".activation";
+    size_t prefix_length = sizeof prefix - 1;
+    size_t suffix_length = sizeof suffix - 1;
+    if (key->length <= prefix_length + suffix_length ||
+        memcmp(key->data, prefix, prefix_length) != 0 ||
+        memcmp(key->data + key->length - suffix_length, suffix, suffix_length) != 0)
+        return 0;
+    uint64_t index = 0;
+    for (size_t i = prefix_length; i < key->length - suffix_length; i++) {
+        if (key->data[i] < '0' || key->data[i] > '9' || index > 63)
+            return 0;
+        index = index * 10 + (uint64_t)(key->data[i] - '0');
+    }
+    *out_index = (uint32_t)index;
+    return 1;
+}
+
+static BNNE_Status store_mlp_activation(bnne_gguf* g, uint32_t index,
+                                        const bnne_gguf_string* text) {
+    if (index >= g->mlp_activation_count) {
+        uint64_t count = (uint64_t)index + 1;
+        if (count > 64)
+            return BNNE_EFORMAT;
+        char (*activations)[16] = realloc(g->mlp_activations, (size_t)count * sizeof *activations);
+        if (!activations)
+            return BNNE_ENOMEM;
+        memset(activations + g->mlp_activation_count, 0,
+               (size_t)(count - g->mlp_activation_count) * sizeof *activations);
+        g->mlp_activations = activations;
+        g->mlp_activation_count = count;
+    }
+    if (!copy_string(text, g->mlp_activations[index], sizeof g->mlp_activations[index]))
+        return BNNE_EFORMAT;
+    return BNNE_OK;
+}
+
+static BNNE_Status read_token_array(Cursor* c, uint32_t type, bnne_gguf_string** out,
                                     uint64_t* out_count) {
     if (type != GGUF_ARRAY)
         return BNNE_EFORMAT;
     uint32_t element = read_u32(c);
     uint64_t count = read_u64(c);
     if (!c->ok || element != GGUF_STRING ||
-        count > (uint64_t)SIZE_MAX / sizeof(BnneGgufString))
+        count > (uint64_t)SIZE_MAX / sizeof(bnne_gguf_string))
         return BNNE_EFORMAT;
-    BnneGgufString* values = count ? calloc((size_t)count, sizeof *values) : NULL;
+    bnne_gguf_string* values = count ? calloc((size_t)count, sizeof *values) : NULL;
     if (count && !values)
         return BNNE_ENOMEM;
     for (uint64_t i = 0; i < count; i++) {
@@ -197,16 +228,17 @@ static BNNE_Status read_token_types(Cursor* c, uint32_t type, uint32_t** out,
     return BNNE_OK;
 }
 
-static BNNE_Status parse_metadata(Cursor* c, BnneGguf* g, uint64_t count) {
+static BNNE_Status parse_metadata(Cursor* c, bnne_gguf* g, uint64_t count) {
     if (!c->ok || count > 4096)
         return BNNE_EFORMAT;
     for (uint64_t i = 0; i < count; i++) {
-        BnneGgufString key = read_string(c);
+        bnne_gguf_string key = read_string(c);
         uint32_t type = read_u32(c);
         if (!c->ok)
             return BNNE_EFORMAT;
         uint64_t integer = 0;
-        BnneGgufString text = {NULL, 0};
+        uint32_t mlp_index = 0;
+        bnne_gguf_string text = {NULL, 0};
         BNNE_Status status = BNNE_OK;
 
         if (key_is(&key, "general.architecture")) {
@@ -246,6 +278,27 @@ static BNNE_Status parse_metadata(Cursor* c, BnneGguf* g, uint64_t count) {
             if (!float_value(c, type, &g->rope_factor)) return BNNE_EFORMAT;
         } else if (key_is(&key, "qwen3.rope.scaling.original_context_length")) {
             if (!integer_value(c, type, &g->rope_original_context)) return BNNE_EFORMAT;
+        } else if (key_is(&key, "bnn-mlp.block_count")) {
+            if (!integer_value(c, type, &g->mlp_block_count)) return BNNE_EFORMAT;
+        } else if (key_is(&key, "bnn-mlp.class_count")) {
+            if (!integer_value(c, type, &g->mlp_class_count)) return BNNE_EFORMAT;
+        } else if (key_is(&key, "bnn-mlp.input_features")) {
+            if (!integer_value(c, type, &g->mlp_input_features)) return BNNE_EFORMAT;
+        } else if (key_is(&key, "bnn-mlp.input_pixels")) {
+            if (!integer_value(c, type, &g->mlp_input_pixels)) return BNNE_EFORMAT;
+        } else if (key_is(&key, "bnn-mlp.input_mean")) {
+            if (!float_value(c, type, &g->mlp_input_mean)) return BNNE_EFORMAT;
+        } else if (key_is(&key, "bnn-mlp.input_std")) {
+            if (!float_value(c, type, &g->mlp_input_std)) return BNNE_EFORMAT;
+        } else if (key_is(&key, "bnn-mlp.labels")) {
+            if (g->mlp_labels)
+                return BNNE_EFORMAT;
+            status = read_token_array(c, type, &g->mlp_labels, &g->mlp_label_count);
+        } else if (mlp_activation_key(&key, &mlp_index)) {
+            if (type != GGUF_STRING) return BNNE_EFORMAT;
+            text = read_string(c);
+            if (!c->ok) return BNNE_EFORMAT;
+            status = store_mlp_activation(g, mlp_index, &text);
         } else if (key_is(&key, "tokenizer.ggml.model")) {
             if (type != GGUF_STRING) return BNNE_EFORMAT;
             text = read_string(c);
@@ -291,8 +344,7 @@ static BNNE_Status parse_metadata(Cursor* c, BnneGguf* g, uint64_t count) {
     }
     return c->ok ? BNNE_OK : BNNE_EFORMAT;
 }
-
-static int element_count(const BnneGgufTensor* t, uint64_t* out) {
+static int element_count(const bnne_gguf_tensor* t, uint64_t* out) {
     uint64_t count = 1;
     for (uint32_t d = 0; d < t->rank; d++) {
         if (t->dims[d] == 0 || count > UINT64_MAX / t->dims[d])
@@ -303,7 +355,7 @@ static int element_count(const BnneGgufTensor* t, uint64_t* out) {
     return 1;
 }
 
-static BNNE_Status tensor_bytes(BnneGgufTensor* t) {
+static BNNE_Status tensor_bytes(bnne_gguf_tensor* t) {
     uint64_t count = 0;
     if (!element_count(t, &count))
         return BNNE_EFORMAT;
@@ -326,15 +378,15 @@ static BNNE_Status tensor_bytes(BnneGgufTensor* t) {
     return BNNE_OK;
 }
 
-static BNNE_Status parse_tensors(Cursor* c, BnneGguf* g, uint64_t count) {
-    if (!c->ok || count == 0 || count > (uint64_t)SIZE_MAX / sizeof(BnneGgufTensor))
+static BNNE_Status parse_tensors(Cursor* c, bnne_gguf* g, uint64_t count) {
+    if (!c->ok || count == 0 || count > (uint64_t)SIZE_MAX / sizeof(bnne_gguf_tensor))
         return BNNE_EFORMAT;
     g->tensors = calloc((size_t)count, sizeof *g->tensors);
     if (!g->tensors)
         return BNNE_ENOMEM;
     g->tensor_count = count;
     for (uint64_t i = 0; i < count; i++) {
-        BnneGgufTensor* t = &g->tensors[i];
+        bnne_gguf_tensor* t = &g->tensors[i];
         t->name = read_string(c);
         t->rank = read_u32(c);
         if (!c->ok || t->rank == 0 || t->rank > BNNE_GGUF_MAX_DIMS)
@@ -349,27 +401,30 @@ static BNNE_Status parse_tensors(Cursor* c, BnneGguf* g, uint64_t count) {
     return BNNE_OK;
 }
 
-BNNE_Status bnne_gguf_open(FILE* file, BnneGguf** out, char* error, size_t error_size) {
-    if (!file || !out)
+BNNE_Status bnne_gguf_open(const char* path, bnne_gguf** out) {
+    if (!path || !out)
         return BNNE_EINVAL;
     *out = NULL;
+
+    int fd = open(path, O_RDONLY);
+    if (fd < 0)
+        return bnne_error(BNNE_EIO, "%s: cannot open GGUF file", path);
+
     struct stat st;
-    if (fstat(fileno(file), &st) != 0 || st.st_size <= 0) {
-        set_error(error, error_size, "cannot stat GGUF file");
-        return BNNE_EIO;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0) {
+        close(fd);
+        return bnne_error(BNNE_EIO, "%s: cannot stat GGUF file", path);
     }
     size_t size = (size_t)st.st_size;
-    uint8_t* mapping = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fileno(file), 0);
-    if (mapping == MAP_FAILED) {
-        set_error(error, error_size, "cannot mmap GGUF file");
-        return BNNE_EIO;
-    }
+    uint8_t* mapping = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapping == MAP_FAILED)
+        return bnne_error(BNNE_EIO, "%s: cannot mmap GGUF file", path);
 
-    BnneGguf* g = calloc(1, sizeof *g);
+    bnne_gguf* g = calloc(1, sizeof *g);
     if (!g) {
         munmap(mapping, size);
-        set_error(error, error_size, "out of memory");
-        return BNNE_ENOMEM;
+        return bnne_error(BNNE_ENOMEM, "out of memory");
     }
     g->mapping = mapping;
     g->mapping_bytes = size;
@@ -384,8 +439,7 @@ BNNE_Status bnne_gguf_open(FILE* file, BnneGguf** out, char* error, size_t error
     uint64_t metadata_count = read_u64(&c);
     if (!c.ok || memcmp(magic, "GGUF", 4) != 0 || version != 3) {
         bnne_gguf_close(g);
-        set_error(error, error_size, "unsupported GGUF header or version");
-        return BNNE_EFORMAT;
+        return bnne_error(BNNE_EFORMAT, "%s: unsupported GGUF header or version", path);
     }
 
     BNNE_Status status = parse_metadata(&c, g, metadata_count);
@@ -393,53 +447,39 @@ BNNE_Status bnne_gguf_open(FILE* file, BnneGguf** out, char* error, size_t error
         status = parse_tensors(&c, g, tensor_count);
     if (status != BNNE_OK) {
         bnne_gguf_close(g);
-        set_error(error, error_size, "invalid GGUF metadata or tensor table");
-        return status;
+        return bnne_error(status, "%s: invalid GGUF metadata or tensor table", path);
+    }
+    if (!g->architecture[0]) {
+        bnne_gguf_close(g);
+        return bnne_error(BNNE_EFORMAT, "%s: missing general.architecture", path);
     }
 
     size_t info_end = (size_t)(c.p - mapping);
     size_t align = g->alignment;
     if (align == 0 || info_end > SIZE_MAX - (align - 1)) {
         bnne_gguf_close(g);
-        set_error(error, error_size, "invalid GGUF alignment");
-        return BNNE_EFORMAT;
+        return bnne_error(BNNE_EFORMAT, "%s: invalid GGUF alignment", path);
     }
     g->data_offset = (uint64_t)((info_end + align - 1) / align * align);
     if (g->data_offset > size) {
         bnne_gguf_close(g);
-        set_error(error, error_size, "GGUF data section is out of bounds");
-        return BNNE_EFORMAT;
+        return bnne_error(BNNE_EFORMAT, "%s: GGUF data section is out of bounds", path);
     }
 
     for (uint64_t i = 0; i < g->tensor_count; i++) {
-        BnneGgufTensor* t = &g->tensors[i];
+        bnne_gguf_tensor* t = &g->tensors[i];
         status = tensor_bytes(t);
         if (status != BNNE_OK) {
             bnne_gguf_close(g);
-            set_error(error, error_size, "unsupported tensor type or shape");
-            return status;
+            return bnne_error(status, "%s: unsupported tensor type or shape", path);
         }
         uint64_t available = (uint64_t)(size - (size_t)g->data_offset);
         if (t->offset > available || t->bytes > available - t->offset) {
             bnne_gguf_close(g);
-            set_error(error, error_size, "GGUF tensor data is out of bounds");
-            return BNNE_EFORMAT;
+            return bnne_error(BNNE_EFORMAT, "%s: GGUF tensor data is out of bounds", path);
         }
     }
 
-    if (strcmp(g->architecture, "qwen3") != 0) {
-        bnne_gguf_close(g);
-        set_error(error, error_size, "GGUF architecture is not qwen3");
-        return BNNE_ENOTSUP;
-    }
-    if (!g->block_count || !g->embedding_length || !g->feed_forward_length ||
-        !g->head_count || !g->head_count_kv || !g->key_length ||
-        g->key_length != g->value_length || !g->token_count ||
-        !(g->rms_epsilon > 0.0f) || !(g->rope_freq_base > 0.0f)) {
-        bnne_gguf_close(g);
-        set_error(error, error_size, "GGUF is missing required qwen3 metadata");
-        return BNNE_EFORMAT;
-    }
     if (g->rope_factor <= 0.0f)
         g->rope_factor = 1.0f;
     if (g->rope_original_context == 0)
@@ -449,31 +489,33 @@ BNNE_Status bnne_gguf_open(FILE* file, BnneGguf** out, char* error, size_t error
     return BNNE_OK;
 }
 
-void bnne_gguf_close(BnneGguf* g) {
+void bnne_gguf_close(bnne_gguf* g) {
     if (!g)
         return;
     free(g->tensors);
     free(g->tokens);
     free(g->token_types);
     free(g->merges);
+    free(g->mlp_activations);
+    free(g->mlp_labels);
     if (g->mapping)
         munmap(g->mapping, g->mapping_bytes);
     free(g);
 }
 
-const BnneGgufTensor* bnne_gguf_find(const BnneGguf* g, const char* name) {
+const bnne_gguf_tensor* bnne_gguf_find(const bnne_gguf* g, const char* name) {
     if (!g || !name)
         return NULL;
     size_t length = strlen(name);
     for (uint64_t i = 0; i < g->tensor_count; i++) {
-        const BnneGgufTensor* t = &g->tensors[i];
+        const bnne_gguf_tensor* t = &g->tensors[i];
         if (t->name.length == length && memcmp(t->name.data, name, length) == 0)
             return t;
     }
     return NULL;
 }
 
-const uint8_t* bnne_gguf_data(const BnneGguf* g, const BnneGgufTensor* t) {
+const uint8_t* bnne_gguf_data(const bnne_gguf* g, const bnne_gguf_tensor* t) {
     if (!g || !t)
         return NULL;
     return g->mapping + g->data_offset + t->offset;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""NumPy reference for the Qwen3/Q1_0 path used by bnn-sw/model-qwen3.c.
+"""NumPy reference for the Qwen3/Q1_0 path used by bnn-sw-v2/qwen3/qwen3.c.
 
 The reference deliberately emulates the project's W1A8 contract:
   * activations are quantized per row with absmax/127,
@@ -7,8 +7,9 @@ The reference deliberately emulates the project's W1A8 contract:
   * each group dot is accumulated in FP32 in increasing group order,
   * host RMSNorm/RoPE/attention/SwiGLU stay in FP32.
 
-It writes the existing --ref format:
-  uint32 n, uint32 V, int32 ids[n], float32 logits[n][V]
+The optional --out file uses the legacy BNR3 --ref layout for offline
+inspection; the current v2 CLI has no --ref option.  --topk prints the
+reference classes/logits for manual comparison.
 """
 
 import argparse

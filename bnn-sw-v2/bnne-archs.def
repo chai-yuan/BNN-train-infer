@@ -1,0 +1,2 @@
+BNNE_ARCH(bnn_mlp)
+BNNE_ARCH(qwen3)

@@ -1,13 +1,14 @@
 data/
 local-notes/
 
-bnn-infer
+bnn-infer-v2
 build/
 *.o
 *.out
 *.bin
-*.bnn
 *.gguf
+*.f32
+*.u8
 
 __pycache__/
 *.py[cod]

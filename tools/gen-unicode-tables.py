@@ -42,7 +42,7 @@ def emit_ranges(name, ranges):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="bnn-sw/unicode-data.h")
+    parser.add_argument("--out", default="bnn-sw-v2/tokenizer/unicode-data.h")
     args = parser.parse_args()
 
     letters = ranges_for(

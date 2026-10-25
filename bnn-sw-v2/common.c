@@ -1,22 +1,32 @@
 #define _POSIX_C_SOURCE 200809L
-#include "internal.h"
+
+#include "bnne-internal.h"
 
 #include <math.h>
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
-BNNE_Status bnne_error(BNNE_Engine engine, BNNE_Status status, const char* format, ...) {
-    if (engine) {
-        va_list args;
-        va_start(args, format);
-        vsnprintf(engine->error, sizeof engine->error, format, args);
-        va_end(args);
-    }
+static _Thread_local char bnne_error_text[192];
+
+void bnne_error_clear(void) {
+    bnne_error_text[0] = '\0';
+}
+
+BNNE_Status bnne_error(BNNE_Status status, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(bnne_error_text, sizeof bnne_error_text, format, args);
+    va_end(args);
     return status;
 }
 
-BNNE_Status bnne_accel_status(BNNE_Engine engine, BNN_Status status, const char* operation) {
+const char* BNNE_LastError(void) {
+    return bnne_error_text;
+}
+
+BNNE_Status bnne_accel_error(BNN_Status status, const char* operation) {
     if (status == BNN_OK)
         return BNNE_OK;
     BNNE_Status result;
@@ -27,7 +37,7 @@ BNNE_Status bnne_accel_status(BNNE_Engine engine, BNN_Status status, const char*
     case BNN_EIO: case BNN_ETIMEOUT: result = BNNE_EIO; break;
     default: result = BNNE_ECOMPUTE; break;
     }
-    return bnne_error(engine, result, "%s: %s", operation, BNN_StatusString(status));
+    return bnne_error(result, "%s: %s", operation, BNN_StatusString(status));
 }
 
 uint64_t bnne_now_ns(void) {
@@ -35,31 +45,6 @@ uint64_t bnne_now_ns(void) {
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
         return 0;
     return (uint64_t)ts.tv_sec * UINT64_C(1000000000) + (uint64_t)ts.tv_nsec;
-}
-
-void bnne_read(BNNE_Reader* reader, void* dst, size_t bytes) {
-    if (reader->status == BNNE_OK && fread(dst, 1, bytes, reader->file) != bytes)
-        reader->status = ferror(reader->file) ? BNNE_EIO : BNNE_EFORMAT;
-}
-
-uint16_t bnne_read_u16(BNNE_Reader* reader) {
-    uint8_t bytes[2] = {0};
-    bnne_read(reader, bytes, sizeof bytes);
-    return (uint16_t)((uint16_t)bytes[0] | ((uint16_t)bytes[1] << 8));
-}
-
-uint32_t bnne_read_u32(BNNE_Reader* reader) {
-    uint8_t bytes[4] = {0};
-    bnne_read(reader, bytes, sizeof bytes);
-    return (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) |
-           ((uint32_t)bytes[2] << 16) | ((uint32_t)bytes[3] << 24);
-}
-
-float bnne_read_f32(BNNE_Reader* reader) {
-    uint32_t bits = bnne_read_u32(reader);
-    float value;
-    memcpy(&value, &bits, sizeof value);
-    return value;
 }
 
 float bnne_fp16_to_fp32(uint16_t half) {
@@ -98,11 +83,23 @@ BNNE_Status bnne_quantize(const float* input, uint32_t count, int8_t* output, fl
             amax = fabsf(input[k]);
     }
     *scale = amax > 0.0f ? amax / 127.0f : 1.0f;
-    if (*scale == 0.0f)
-        return BNNE_ECOMPUTE;
     for (uint32_t k = 0; k < count; k++) {
         float q = roundf(input[k] / *scale);
         output[k] = (int8_t)(q > 127.0f ? 127 : (q < -127.0f ? -127 : q));
     }
     return BNNE_OK;
+}
+
+const char* BNNE_StatusString(BNNE_Status status) {
+    switch (status) {
+    case BNNE_OK: return "success";
+    case BNNE_EINVAL: return "invalid argument";
+    case BNNE_ENOMEM: return "out of memory";
+    case BNNE_ENOTSUP: return "unsupported model or device capability";
+    case BNNE_ERANGE: return "size or capacity out of range";
+    case BNNE_EIO: return "I/O error";
+    case BNNE_EFORMAT: return "invalid or truncated model";
+    case BNNE_ECOMPUTE: return "computation failed or produced non-finite values";
+    default: return "unknown status";
+    }
 }

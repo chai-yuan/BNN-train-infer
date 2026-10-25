@@ -1,9 +1,8 @@
 #include "tokenizer-bpe.h"
 
+#include "../bnne-internal.h"
 #include "unicode-data.h"
 
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -27,12 +26,12 @@ typedef struct {
 } MergeEntry;
 
 typedef struct {
-    BnneGgufString text;
+    bnne_gguf_string text;
     uint32_t id;
 } SpecialToken;
 
-struct QwenTokenizer {
-    const BnneGguf* gguf;
+struct bnne_tokenizer {
+    const bnne_gguf* gguf;
     TokenEntry* tokens;
     uint32_t token_capacity;
     MergeEntry* merges;
@@ -41,6 +40,12 @@ struct QwenTokenizer {
     uint32_t special_count;
     uint32_t byte_to_cp[256];
     uint32_t byte_token_id[256];
+
+    char* piece_text;
+    uint32_t* piece_off;
+    uint32_t* piece_len;
+    uint32_t eog_ids[8];
+    uint32_t eog_count;
 };
 
 typedef struct {
@@ -49,15 +54,6 @@ typedef struct {
     uint32_t count;
     int overflow;
 } Output;
-
-static void set_error(char* error, size_t size, const char* format, ...) {
-    if (!error || !size)
-        return;
-    va_list args;
-    va_start(args, format);
-    vsnprintf(error, size, format, args);
-    va_end(args);
-}
 
 static uint32_t next_pow2(uint64_t value) {
     uint32_t result = 1;
@@ -82,7 +78,7 @@ static uint64_t hash_pair(const uint8_t* left, size_t left_length,
     return a ^ (b + 0x9e3779b97f4a7c15ull + (a << 6) + (a >> 2));
 }
 
-static uint32_t token_slot(const QwenTokenizer* tokenizer, const uint8_t* text,
+static uint32_t token_slot(const bnne_tokenizer* tokenizer, const uint8_t* text,
                            uint32_t length) {
     uint32_t mask = tokenizer->token_capacity - 1;
     uint32_t index = (uint32_t)hash_bytes(text, length) & mask;
@@ -95,11 +91,11 @@ static uint32_t token_slot(const QwenTokenizer* tokenizer, const uint8_t* text,
     return index;
 }
 
-static void token_insert(QwenTokenizer* tokenizer, const uint8_t* text,
+static void token_insert(bnne_tokenizer* tokenizer, const uint8_t* text,
                          uint32_t length, uint32_t id) {
     uint32_t index = token_slot(tokenizer, text, length);
     if (tokenizer->tokens[index].used) {
-        tokenizer->tokens[index].id = id;  /* last duplicate wins */
+        tokenizer->tokens[index].id = id; /* last duplicate wins */
         return;
     }
     tokenizer->tokens[index].text = text;
@@ -108,7 +104,7 @@ static void token_insert(QwenTokenizer* tokenizer, const uint8_t* text,
     tokenizer->tokens[index].used = 1;
 }
 
-static int token_lookup(const QwenTokenizer* tokenizer, const uint8_t* text,
+static int token_lookup(const bnne_tokenizer* tokenizer, const uint8_t* text,
                         uint32_t length, uint32_t* out_id) {
     uint32_t index = token_slot(tokenizer, text, length);
     if (!tokenizer->tokens[index].used)
@@ -117,7 +113,7 @@ static int token_lookup(const QwenTokenizer* tokenizer, const uint8_t* text,
     return 1;
 }
 
-static uint32_t merge_slot(const QwenTokenizer* tokenizer,
+static uint32_t merge_slot(const bnne_tokenizer* tokenizer,
                            const uint8_t* left, uint32_t left_length,
                            const uint8_t* right, uint32_t right_length) {
     uint32_t mask = tokenizer->merge_capacity - 1;
@@ -133,12 +129,12 @@ static uint32_t merge_slot(const QwenTokenizer* tokenizer,
     return index;
 }
 
-static void merge_insert(QwenTokenizer* tokenizer,
+static void merge_insert(bnne_tokenizer* tokenizer,
                          const uint8_t* left, uint32_t left_length,
                          const uint8_t* right, uint32_t right_length, uint32_t rank) {
     uint32_t index = merge_slot(tokenizer, left, left_length, right, right_length);
     if (tokenizer->merges[index].used)
-        return;  /* first duplicate wins */
+        return; /* first duplicate wins */
     tokenizer->merges[index].left = left;
     tokenizer->merges[index].left_length = left_length;
     tokenizer->merges[index].right = right;
@@ -147,7 +143,7 @@ static void merge_insert(QwenTokenizer* tokenizer,
     tokenizer->merges[index].used = 1;
 }
 
-static int merge_lookup(const QwenTokenizer* tokenizer,
+static int merge_lookup(const bnne_tokenizer* tokenizer,
                         const uint8_t* left, uint32_t left_length,
                         const uint8_t* right, uint32_t right_length, uint32_t* out_rank) {
     uint32_t index = merge_slot(tokenizer, left, left_length, right, right_length);
@@ -291,11 +287,34 @@ static uint32_t ascii_lower(uint32_t cp) {
     return cp >= 'A' && cp <= 'Z' ? cp + ('a' - 'A') : cp;
 }
 
-static int cp_to_byte(const QwenTokenizer* tokenizer, uint32_t cp) {
+static int cp_to_byte(const bnne_tokenizer* tokenizer, uint32_t cp) {
     for (int byte = 0; byte < 256; byte++)
         if (tokenizer->byte_to_cp[byte] == cp)
             return byte;
     return -1;
+}
+
+static size_t detokenize(const bnne_tokenizer* tokenizer, const uint8_t* source,
+                         size_t length, uint8_t* dst) {
+    size_t written = 0, pos = 0;
+    while (pos < length) {
+        uint32_t cp = 0;
+        size_t used = utf8_decode_one(source + pos, length - pos, &cp);
+        if (used) {
+            int byte = cp_to_byte(tokenizer, cp);
+            if (byte >= 0) {
+                dst[written++] = (uint8_t)byte;
+                pos += used;
+                continue;
+            }
+        }
+        if (!used)
+            used = 1;
+        memcpy(dst + written, source + pos, used);
+        written += used;
+        pos += used;
+    }
+    return written;
 }
 
 static void output_push(Output* out, uint32_t id) {
@@ -305,7 +324,7 @@ static void output_push(Output* out, uint32_t id) {
         out->overflow = 1;
 }
 
-static int encode_chunk(const QwenTokenizer* tokenizer, const uint8_t* text,
+static int encode_chunk(const bnne_tokenizer* tokenizer, const uint8_t* text,
                         size_t length, Output* out) {
     if (!length)
         return 1;
@@ -385,7 +404,7 @@ cleanup:
     return ok;
 }
 
-static int add_chunk(const QwenTokenizer* tokenizer, const uint8_t* text,
+static int add_chunk(const bnne_tokenizer* tokenizer, const uint8_t* text,
                      const size_t* offsets, size_t* previous, size_t end, Output* out) {
     if (end > *previous &&
         !encode_chunk(tokenizer, text + offsets[*previous],
@@ -396,7 +415,7 @@ static int add_chunk(const QwenTokenizer* tokenizer, const uint8_t* text,
 }
 
 /* Port of llama.cpp's unicode_regex_split_custom_qwen2. */
-static int encode_segment(const QwenTokenizer* tokenizer, const uint8_t* text,
+static int encode_segment(const bnne_tokenizer* tokenizer, const uint8_t* text,
                           size_t length, Output* out) {
     uint32_t* cpts = NULL;
     size_t* offsets = NULL;
@@ -530,7 +549,7 @@ cleanup:
     return ok && !out->overflow;
 }
 
-static int encode_text(const QwenTokenizer* tokenizer, const char* text, size_t length,
+static int encode_text(const bnne_tokenizer* tokenizer, const char* text, size_t length,
                        int parse_special, Output* out) {
     if (!parse_special)
         return encode_segment(tokenizer, (const uint8_t*)text, length, out);
@@ -566,48 +585,94 @@ static int encode_text(const QwenTokenizer* tokenizer, const char* text, size_t 
     return !out->overflow;
 }
 
-BNNE_Status bnne_qwen_tokenizer_create(const BnneGguf* gguf, QwenTokenizer** out,
-                                       char* error, size_t error_size) {
-    if (!gguf || !out)
+static void add_eog(bnne_tokenizer* tokenizer, uint32_t id) {
+    if (tokenizer->eog_count >= ARRAY_COUNT(tokenizer->eog_ids))
+        return;
+    for (uint32_t i = 0; i < tokenizer->eog_count; i++)
+        if (tokenizer->eog_ids[i] == id)
+            return;
+    tokenizer->eog_ids[tokenizer->eog_count++] = id;
+}
+
+static BNNE_Status build_pieces(bnne_tokenizer* tokenizer) {
+    const bnne_gguf* g = tokenizer->gguf;
+    if (!g->tokens || g->token_count > UINT32_MAX)
+        return bnne_error(BNNE_EFORMAT, "tokenizer vocabulary does not match model");
+
+    uint64_t total = 0;
+    for (uint64_t i = 0; i < g->token_count; i++) {
+        if (total > SIZE_MAX - g->tokens[i].length - 1)
+            return bnne_error(BNNE_ERANGE, "tokenizer vocabulary is too large");
+        total += g->tokens[i].length + 1;
+    }
+    tokenizer->piece_text = malloc((size_t)total);
+    tokenizer->piece_off = malloc((size_t)g->token_count * sizeof *tokenizer->piece_off);
+    tokenizer->piece_len = malloc((size_t)g->token_count * sizeof *tokenizer->piece_len);
+    if (!tokenizer->piece_text || !tokenizer->piece_off || !tokenizer->piece_len)
+        return bnne_error(BNNE_ENOMEM, "out of memory");
+
+    size_t used = 0;
+    for (uint64_t i = 0; i < g->token_count; i++) {
+        const bnne_gguf_string* token = &g->tokens[i];
+        uint32_t type = g->token_types && i < g->token_type_count ?
+                        g->token_types[i] : 1;
+        if (used > UINT32_MAX)
+            return bnne_error(BNNE_ERANGE, "tokenizer vocabulary is too large");
+        uint32_t offset = (uint32_t)used;
+        if (type == 3 || type == 4) {
+            memcpy(tokenizer->piece_text + used, token->data, token->length);
+            used += token->length;
+        } else {
+            used += detokenize(tokenizer, token->data, token->length,
+                               (uint8_t*)tokenizer->piece_text + used);
+        }
+        tokenizer->piece_text[used++] = '\0';
+        tokenizer->piece_off[i] = offset;
+        tokenizer->piece_len[i] = (uint32_t)(used - 1 - offset);
+    }
+
+    if (g->has_eos && g->eos_token_id < g->token_count)
+        add_eog(tokenizer, g->eos_token_id);
+    for (uint64_t i = 0; i < g->token_count; i++) {
+        const bnne_gguf_string* token = &g->tokens[i];
+        if ((token->length == 13 && memcmp(token->data, "<|endoftext|>", 13) == 0) ||
+            (token->length == 10 && memcmp(token->data, "<|im_end|>", 10) == 0))
+            add_eog(tokenizer, (uint32_t)i);
+    }
+    return BNNE_OK;
+}
+
+BNNE_Status bnne_tokenizer_create(const bnne_gguf* g, bnne_tokenizer** out) {
+    if (!g || !out)
         return BNNE_EINVAL;
     *out = NULL;
-    if (!gguf->tokens || !gguf->token_count) {
-        set_error(error, error_size, "tokenizer has no vocabulary");
-        return BNNE_EFORMAT;
-    }
+    if (!g->tokens || !g->token_count)
+        return bnne_error(BNNE_EFORMAT, "tokenizer has no vocabulary");
+    if (g->token_count > UINT32_MAX)
+        return bnne_error(BNNE_ERANGE, "tokenizer vocabulary is too large");
 
-    QwenTokenizer* tokenizer = calloc(1, sizeof *tokenizer);
-    if (!tokenizer) {
-        set_error(error, error_size, "out of memory");
-        return BNNE_ENOMEM;
-    }
-    tokenizer->gguf = gguf;
+    bnne_tokenizer* tokenizer = calloc(1, sizeof *tokenizer);
+    if (!tokenizer)
+        return bnne_error(BNNE_ENOMEM, "out of memory");
+    tokenizer->gguf = g;
 
-    tokenizer->token_capacity = next_pow2((uint64_t)gguf->token_count * 2);
+    tokenizer->token_capacity = next_pow2((uint64_t)g->token_count * 2);
     tokenizer->tokens = calloc(tokenizer->token_capacity, sizeof *tokenizer->tokens);
     if (!tokenizer->tokens) {
-        set_error(error, error_size, "out of memory");
-        bnne_qwen_tokenizer_destroy(tokenizer);
-        return BNNE_ENOMEM;
+        bnne_tokenizer_destroy(tokenizer);
+        return bnne_error(BNNE_ENOMEM, "out of memory");
     }
-    for (uint64_t i = 0; i < gguf->token_count; i++) {
-        if (i > UINT32_MAX) {
-            bnne_qwen_tokenizer_destroy(tokenizer);
-            set_error(error, error_size, "vocabulary is too large");
-            return BNNE_ERANGE;
-        }
-        token_insert(tokenizer, gguf->tokens[i].data, gguf->tokens[i].length, (uint32_t)i);
-    }
+    for (uint64_t i = 0; i < g->token_count; i++)
+        token_insert(tokenizer, g->tokens[i].data, g->tokens[i].length, (uint32_t)i);
 
-    tokenizer->merge_capacity = next_pow2((uint64_t)gguf->merge_count * 2);
+    tokenizer->merge_capacity = next_pow2((uint64_t)g->merge_count * 2);
     tokenizer->merges = calloc(tokenizer->merge_capacity, sizeof *tokenizer->merges);
     if (!tokenizer->merges) {
-        set_error(error, error_size, "out of memory");
-        bnne_qwen_tokenizer_destroy(tokenizer);
-        return BNNE_ENOMEM;
+        bnne_tokenizer_destroy(tokenizer);
+        return bnne_error(BNNE_ENOMEM, "out of memory");
     }
-    for (uint64_t i = 0; i < gguf->merge_count; i++) {
-        const BnneGgufString* merge = &gguf->merges[i];
+    for (uint64_t i = 0; i < g->merge_count; i++) {
+        const bnne_gguf_string* merge = &g->merges[i];
         if (!merge->length)
             continue;
         const uint8_t* separator = memchr(merge->data + 1, ' ', merge->length - 1);
@@ -621,25 +686,24 @@ BNNE_Status bnne_qwen_tokenizer_create(const BnneGguf* gguf, QwenTokenizer** out
         merge_insert(tokenizer, merge->data, left_length, right, right_length, (uint32_t)i);
     }
 
-    for (uint64_t i = 0; i < gguf->token_count; i++) {
-        uint32_t type = gguf->token_types && i < gguf->token_type_count ?
-                        gguf->token_types[i] : 1;
+    for (uint64_t i = 0; i < g->token_count; i++) {
+        uint32_t type = g->token_types && i < g->token_type_count ?
+                        g->token_types[i] : 1;
         if (type == 3 || type == 4)
             tokenizer->special_count++;
     }
     if (tokenizer->special_count) {
         tokenizer->specials = calloc(tokenizer->special_count, sizeof *tokenizer->specials);
         if (!tokenizer->specials) {
-            set_error(error, error_size, "out of memory");
-            bnne_qwen_tokenizer_destroy(tokenizer);
-            return BNNE_ENOMEM;
+            bnne_tokenizer_destroy(tokenizer);
+            return bnne_error(BNNE_ENOMEM, "out of memory");
         }
         uint32_t index = 0;
-        for (uint64_t i = 0; i < gguf->token_count; i++) {
-            uint32_t type = gguf->token_types && i < gguf->token_type_count ?
-                            gguf->token_types[i] : 1;
+        for (uint64_t i = 0; i < g->token_count; i++) {
+            uint32_t type = g->token_types && i < g->token_type_count ?
+                            g->token_types[i] : 1;
             if (type == 3 || type == 4) {
-                tokenizer->specials[index].text = gguf->tokens[i];
+                tokenizer->specials[index].text = g->tokens[i];
                 tokenizer->specials[index].id = (uint32_t)i;
                 index++;
             }
@@ -669,29 +733,37 @@ BNNE_Status bnne_qwen_tokenizer_create(const BnneGguf* gguf, QwenTokenizer** out
         size_t length = utf8_encode(tokenizer->byte_to_cp[byte], encoded);
         uint32_t id = 0;
         if (!token_lookup(tokenizer, encoded, (uint32_t)length, &id)) {
-            set_error(error, error_size, "vocabulary is missing a byte token");
-            bnne_qwen_tokenizer_destroy(tokenizer);
-            return BNNE_EFORMAT;
+            bnne_tokenizer_destroy(tokenizer);
+            return bnne_error(BNNE_EFORMAT, "vocabulary is missing a byte token");
         }
         tokenizer->byte_token_id[byte] = id;
+    }
+
+    BNNE_Status status = build_pieces(tokenizer);
+    if (status != BNNE_OK) {
+        bnne_tokenizer_destroy(tokenizer);
+        return status;
     }
 
     *out = tokenizer;
     return BNNE_OK;
 }
 
-void bnne_qwen_tokenizer_destroy(QwenTokenizer* tokenizer) {
+void bnne_tokenizer_destroy(bnne_tokenizer* tokenizer) {
     if (!tokenizer)
         return;
     free(tokenizer->tokens);
     free(tokenizer->merges);
     free(tokenizer->specials);
+    free(tokenizer->piece_text);
+    free(tokenizer->piece_off);
+    free(tokenizer->piece_len);
     free(tokenizer);
 }
 
-BNNE_Status bnne_qwen_encode(const QwenTokenizer* tokenizer, const char* text,
-                             int parse_special, int32_t* ids, uint32_t capacity,
-                             uint32_t* out_count) {
+BNNE_Status bnne_tokenizer_encode(const bnne_tokenizer* tokenizer, const char* text,
+                                  int parse_special, int32_t* ids, uint32_t capacity,
+                                  uint32_t* out_count) {
     if (!tokenizer || !text || !ids || !out_count || capacity == 0)
         return BNNE_EINVAL;
     Output out = {ids, capacity, 0, 0};
@@ -701,4 +773,24 @@ BNNE_Status bnne_qwen_encode(const QwenTokenizer* tokenizer, const char* text,
     if (!ok)
         return out.overflow ? BNNE_ERANGE : BNNE_EINVAL;
     return BNNE_OK;
+}
+
+BNNE_Status bnne_tokenizer_piece(const bnne_tokenizer* tokenizer, int32_t id,
+                                 const char** out_bytes, size_t* out_len) {
+    if (!tokenizer || !out_bytes || !out_len)
+        return BNNE_EINVAL;
+    if (id < 0 || (uint64_t)id >= tokenizer->gguf->token_count)
+        return BNNE_ERANGE;
+    *out_bytes = tokenizer->piece_text + tokenizer->piece_off[id];
+    *out_len = tokenizer->piece_len[id];
+    return BNNE_OK;
+}
+
+int bnne_tokenizer_is_eog(const bnne_tokenizer* tokenizer, int32_t id) {
+    if (!tokenizer || id < 0 || (uint64_t)id >= tokenizer->gguf->token_count)
+        return 0;
+    for (uint32_t i = 0; i < tokenizer->eog_count; i++)
+        if (tokenizer->eog_ids[i] == (uint32_t)id)
+            return 1;
+    return 0;
 }

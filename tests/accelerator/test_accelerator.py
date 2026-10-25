@@ -14,7 +14,7 @@ simulated device, so the public API, bridge and context runners each add files.
 Pre-existing VCDs in the directory are left untouched.
 
 The archive must contain the backend, bridge, model and Verilator runtime objects.
-This script never invokes make or changes bnn-infer. All build products and dumps
+This script never invokes make or modifies the build tree. All build products and dumps
 live in a temporary directory; no generated headers or third-party Python modules
 are needed. The context interoperation test uses runtime headers discovered via
 verilator --getenv VERILATOR_ROOT; use the same Verilator as the archive build.
