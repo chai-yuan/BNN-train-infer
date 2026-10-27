@@ -23,7 +23,7 @@ bnn-infer-v2.c         命令行入口（llm / classify）
 train/MNIST-MLP/       二值 MLP 训练、bnn-mlp GGUF 与测试数据导出
 tests/accelerator/     加速器 API 与 soft/RTL 差分测试
 tests/trace/           VCD 波形开关测试
-tools/                 Unicode 表生成、Qwen3 NumPy 参考、波形工具
+tools/                 Unicode 表生成、Qwen3 NumPy 参考、波形 / GGUF 检视工具
 ```
 
 ## 构建
@@ -149,4 +149,5 @@ v2 引擎/模型的自动化回归尚未恢复；LLM 和分类的正确性目前
 - `tools/bonsai-ref.py`：Qwen3/Q1_0 的独立 NumPy 参考；`--topk` 打印参考类别与 logits，
   `--out` 写出旧版 BNR3 `--ref` 文件（v2 CLI 不读取）。
 - `tools/wave-deck`：RTL 波形辅助工具。
+- `tools/gguf-lens`：纯前端 GGUF 结构检视器，查看元数据、张量布局、量化块与原始字节。
 - `bnn-hw/README.md`：计算核心握手、完成协议和复位语义。
