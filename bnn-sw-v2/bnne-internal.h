@@ -42,10 +42,8 @@ struct bnne_context {
     struct bnne_model* model;
     BNNE_ContextParams params; /* 已补全默认值 */
     void* state;
-    BNN_Buffer in_buf;  /* n_batch * max_in 字节 */
-    BNN_Buffer out_buf; /* n_batch * max_out * sizeof(float) */
-    int8_t* qbuf;       /* 主机端量化暂存（单行） */
-    float* chunk;       /* 主机端分块输出暂存（单行） */
+    BNN_Buffer in_buf;  /* max_in 个 F32 元素 */
+    BNN_Buffer out_buf; /* max_out 个 F32 元素 */
     uint32_t max_in, max_out;
     uint32_t pos;
     BNNE_Stats stats;
@@ -65,7 +63,7 @@ void bnne_gguf_close(bnne_gguf* g);
 
 /* ---------- 共享算子 ---------- */
 typedef struct {
-    uint32_t in_off, in_len, out_off, out_len; /* 在原逻辑权重中的切片 */
+    uint32_t out_off, out_len; /* 在原逻辑权重中的输出切片 */
     BNN_Matrix matrix;
 } bnne_linear_chunk;
 
@@ -78,13 +76,13 @@ typedef struct {
 /* 读取 Q1_0 张量，重排后调用 BNN_MatrixCreate，并更新 m->max_in / max_out。 */
 BNNE_Status bnne_linear_load(struct bnne_model* m, const bnne_gguf* g, const char* tensor,
                              bnne_linear* out);
-/* 从已重排的 Q1_0 bits/scales 创建（用于 tied embedding）。 */
+/* 从已重排的 Q1_0 bits/scales 创建；in 超过设备 max_in_features 时返回 ENOTSUP。 */
 BNNE_Status bnne_linear_init(struct bnne_model* m, uint32_t in, uint32_t out_features,
                              const uint8_t* bits, const uint16_t* scales, bnne_linear* linear);
 void bnne_linear_free(bnne_linear* l);
-/* x[rows][in] (FP32) → y[rows][out] (FP32)：量化、上传、执行 GEMV/GEMM、读回，同时更新统计。 */
+/* x[in] (FP32) → y[out] (FP32)：上传 F32 激活、执行 GEMV_F32、读回，同时更新统计。 */
 BNNE_Status bnne_linear_forward(struct bnne_context* c, const bnne_linear* l, const float* x,
-                                uint32_t rows, float* y);
+                                float* y);
 
 /* 读取 Q1_0 张量并重排为 accelerator 的 W1 布局。 */
 BNNE_Status bnne_q1_0_read(const bnne_gguf* g, const char* tensor, uint32_t in, uint32_t out,
@@ -93,9 +91,8 @@ BNNE_Status bnne_q1_0_read(const bnne_gguf* g, const char* tensor, uint32_t in, 
 BNNE_Status bnne_tensor_f32(struct bnne_model* m, const bnne_gguf* g, const char* tensor,
                             const float** out, size_t* out_n);
 
-/* 主机端 FP16→FP32 与逐行 absmax int8 量化。 */
+/* 主机端 FP16→FP32 转换。 */
 float bnne_fp16_to_fp32(uint16_t half);
-BNNE_Status bnne_quantize(const float* input, uint32_t count, int8_t* output, float* scale);
 
 uint64_t bnne_now_ns(void);
 

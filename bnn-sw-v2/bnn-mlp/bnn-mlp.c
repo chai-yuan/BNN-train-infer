@@ -182,7 +182,7 @@ static BNNE_Status bnn_mlp_classify(struct bnne_context* c, const float* input, 
             float* y = i + 1 == model->layer_count
                            ? logits + (size_t)sample * model->class_count
                            : s->work[i & 1];
-            BNNE_Status status = bnne_linear_forward(c, &layer->weight, x, 1, y);
+            BNNE_Status status = bnne_linear_forward(c, &layer->weight, x, y);
             if (status != BNNE_OK)
                 return status;
             for (uint32_t o = 0; o < layer->out_features; o++) {

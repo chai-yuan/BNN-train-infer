@@ -2,8 +2,10 @@
 
 本项目探索面向硬件的 **W1A8 二值神经网络推理**：权重为 ±1 符号，
 每 128 个权重共享一个 FP16 scale；激活按行量化为 int8。
-组内做整数点积，组间用 FP32 累加。矩阵运算统一通过 `bnn-accelerator`，
-可在 C 软件模拟（`ACCE=soft`）和 Verilator RTL 仿真（`ACCE=verilator`）之间切换。
+组内做整数点积，组间用 FP32 累加。矩阵运算统一通过 `bnn-accelerator`。
+旧 Verilator 软件后端及 C++ 桥接已移除，当前只保留 C 软件参考后端（`ACCE=soft`）。
+`bnn-hw` RTL、独立可选的 Verilator 核心自检和 `tools/wave-deck` 波形工具仍保留；
+它们不参与引擎或 CLI 的默认构建。
 
 当前 v2 只保留两条推理闭环：
 
@@ -17,13 +19,12 @@
 
 ```text
 bnn-sw-v2/             v2 引擎：公共 API、GGUF、tokenizer/、bnn-mlp/、qwen3/
-bnn-accelerator/       BNN_* 设备接口、soft/Verilator 后端与 RTL 桥接
+bnn-accelerator/       BNN_* API v2 与 soft 软件参考后端
 bnn-hw/                SystemVerilog 计算核心、自检与接口说明
 bnn-infer-v2.c         命令行入口（llm / classify）
 train/MNIST-MLP/       二值 MLP 训练、bnn-mlp GGUF 与测试数据导出
-tests/accelerator/     加速器 API 与 soft/RTL 差分测试
-tests/trace/           VCD 波形开关测试
-tools/                 Unicode 表生成、Qwen3 NumPy 参考、波形 / GGUF 检视工具
+tests/accelerator/     加速器 API 与 soft 参考测试（默认不依赖 Verilator）
+tools/                 Unicode 表、Qwen3 NumPy 参考与精度对比、波形 / GGUF 检视工具
 ```
 
 ## 构建
@@ -36,14 +37,31 @@ make ACCE=soft
 # 产物：bnn-infer-v2、build/soft/libbnn-engine.a
 ```
 
-Verilator 后端另需 Verilator 和 C++17 编译器：
+省略 `ACCE` 时同样使用 `soft`。根 Makefile 只接受 `ACCE=soft`，其他值会显式报错，
+不会静默回退，也不调用 Verilator 或 C++ 工具链。
+`make clean` 删除 `bnn-infer-v2` 和 `build/soft`；不会清理历史硬件构建目录或用户波形。
 
-```bash
-make ACCE=verilator -j2
-# 产物：bnn-infer-v2、build/verilator/libbnn-engine.a
-```
+## 加速器 API v2
 
-`make clean` 删除 `bnn-infer-v2` 和当前 `ACCE` 的构建目录。
+接口、GGUF 布局取舍和后端实现边界详见 [`bnn-accelerator/README.md`](bnn-accelerator/README.md)。
+这是破坏性接口更新，调用者与后端必须一起重新编译。
+
+- `BNN_BufferView` 是随任务显式传入的无状态视图：类型、布局与缓冲区范围由本次任务描述，
+  不通过 Set/Get 接口在缓冲区上保存可变视图状态。
+- `DOT_GROUPS` 输出 `[rows][out_features][groups]` 的 **I16** 分组整数点积，
+  不再使用公共 I32 输出；本版要求 G 为 8 的倍数且不超过 256，I8 激活范围 `[-127, 127]`，
+  因而组点积绝对值最多为 32512，可由 I16 精确表示。
+- I8 输入和 F32 输入的 GEMV/GEMM 是不同操作。I8 路径接收调用方量化后的激活，
+  执行整数点积和权重 scale 的 FP32 累加；F32 路径由后端完成逐行 absmax 对称量化、
+  分组点积和输出还原，本版固定使用 I8 量化，不提供量化模式选择。
+- soft 参考后端实现全部 5 种运算；`supported_ops` 表示完整后端提供的逻辑能力，
+  包含相应量化规则，而非硬件单次 tile 限制。
+- 引擎使用单行 `GEMV_F32` 路径，主机侧不再做激活量化；超宽输出按
+  `max_out_features` 分片，矩阵输入宽度必须落在 `max_in_features` 内。
+  未来硬件接入、设备调度与 IPC 设计留待后续，本轮不实现新后端。
+
+公共 DOT 的 I16 布局与旧 RTL 的 `res_data[31:0]` 物理结果协议解耦；本轮不修改 RTL，
+也不要求核心结果总线缩窄。
 
 ## LLM：Qwen3
 
@@ -104,11 +122,14 @@ python3 train/MNIST-MLP/train_mnist_mlp.py
 
 ## 模型格式
 
+GGUF 文件格式及磁盘上的 Q1_0 布局不变。加载层继续负责把 GGUF 数据 repack 为
+加速器所需的权重位和 scale 布局；本轮不把 repack 迁移到公共 API 或硬件后端。
+
 ### Qwen3
 
 `general.architecture = "qwen3"`，权重为 Q1_0 张量（每 128 个 ±1 权重一个 FP16 scale），
-RMSNorm 等为 F32。引擎按 accelerator 能力把 FFN（6144）和 lm_head（151669）
-切到每矩阵 4096 以内；KV Cache 按 Context 独立分配。
+RMSNorm 等为 F32。引擎按 accelerator 的逻辑能力切分矩阵；当前 soft 上限为 8192，
+FFN（6144）单块执行，lm_head（151669）按输出分片。KV Cache 按 Context 独立分配。
 
 ### bnn-mlp
 
@@ -132,22 +153,32 @@ blk.{i}.post_bias    F32，dims=[out]
 
 ## 测试
 
-当前保留的自动化测试只覆盖 accelerator 和 RTL 波形，均直接使用公共 `BNN_*` API：
+加速器 API 与 soft 参考测试默认不依赖 Verilator：
 
 ```bash
-make -C tests/accelerator test   # soft/RTL 差分、桥接、宿主 context
-make -C tests/trace test         # VCD 开关与内容
-make -C bnn-hw/bnn_core_test test
+make -C tests/accelerator test
 ```
 
+硬件自检是独立可选项，需要 Verilator 及其 C++ 构建工具链，不链接软件加速器后端：
+
+```bash
+make -C bnn-hw/bnn_core_test test
+make -C bnn-hw/bnn_core_test lint
+```
+
+旧桥接/context 测试和 `tests/trace` 波形开关测试已随软件后端删除。
+`bnn_core_test` 当前没有 `waves` 目标或 VCD 导出逻辑；可用现有 fixture 查看波形，
+不能再通过推理 CLI 或已移除的后端生成 VCD。
+
 v2 引擎/模型的自动化回归尚未恢复；LLM 和分类的正确性目前用上面的 CLI 命令手动验证。
-`tests/accelerator` 和 `tests/trace` 会自动构建 `ACCE=verilator` 归档。
 
 ## 工具
 
 - `tools/gen-unicode-tables.py`：重新生成 `bnn-sw-v2/tokenizer/unicode-data.h`。
-- `tools/bonsai-ref.py`：Qwen3/Q1_0 的独立 NumPy 参考；`--topk` 打印参考类别与 logits，
-  `--out` 写出旧版 BNR3 `--ref` 文件（v2 CLI 不读取）。
-- `tools/wave-deck`：RTL 波形辅助工具。
+- `tools/bonsai-ref.py`：Qwen3/Q1_0 的独立 NumPy 参考；`--activation a8|a32` 选择激活精度，
+  `--topk` 打印参考类别与 logits，`--out` 写出旧版 BNR3 `--ref` 布局（v2 CLI 不读取）。
+- `tools/precision/`：Qwen3 C W1A8 与 NumPy A32/A8 的逐位置 logits、top-k、KL、PPL 对比，
+  区分实现误差与预期量化损失，并在差距过大时显著告警。
+- `tools/wave-deck`：独立 RTL 波形辅助工具；保留示例/fixtures 与字体资源（字体也供 gguf-lens 共用）。
 - `tools/gguf-lens`：纯前端 GGUF 结构检视器，查看元数据、张量布局、量化块与原始字节。
 - `bnn-hw/README.md`：计算核心握手、完成协议和复位语义。

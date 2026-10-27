@@ -2,7 +2,6 @@
 
 #include "bnne-internal.h"
 
-#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -72,22 +71,6 @@ float bnne_fp16_to_fp32(uint16_t half) {
     float value;
     memcpy(&value, &bits, sizeof value);
     return value;
-}
-
-BNNE_Status bnne_quantize(const float* input, uint32_t count, int8_t* output, float* scale) {
-    float amax = 0.0f;
-    for (uint32_t k = 0; k < count; k++) {
-        if (!isfinite(input[k]))
-            return BNNE_ECOMPUTE;
-        if (fabsf(input[k]) > amax)
-            amax = fabsf(input[k]);
-    }
-    *scale = amax > 0.0f ? amax / 127.0f : 1.0f;
-    for (uint32_t k = 0; k < count; k++) {
-        float q = roundf(input[k] / *scale);
-        output[k] = (int8_t)(q > 127.0f ? 127 : (q < -127.0f ? -127 : q));
-    }
-    return BNNE_OK;
 }
 
 const char* BNNE_StatusString(BNNE_Status status) {

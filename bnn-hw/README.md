@@ -112,25 +112,27 @@ reset 置位期间屏蔽所有握手，`cmd_ready`、`in_ready` 和 `res_valid` 
 
 ## 软件接入边界
 
-本核心实现 `BNN_OP_DOT_GROUPS` 的算术部分。现有引擎 runtime 调用 GEMV/GEMM，要求 float 输出，
-因此不能直接将本核心结果当作完整 GEMV/GEMM 返回。
-硬件后端需要在 CPU 或设备后处理层执行 FP16 scale 到 FP32 的转换、每组乘法和按组顺序的 FP32 累加。
+本核心提供分组整数点积算术，但其物理接口不等同于公共加速器 API。
+API v2 使用随任务传入的无状态 `BNN_BufferView`，`BNN_OP_DOT_GROUPS` 的公共输出为 I16；
+这里的 `res_data[31:0]` 则是旧核心的 **32 位物理结果协议**，支持更大的可配置逻辑组。
+二者解耦，本轮保留 RTL 及其结果位宽不变，不要求把物理总线缩窄为 I16。
+未来适配层必须按公共 API 的组大小、数值范围和布局验证并转换结果，而不能直接拷贝物理结果流。
+
+I8 输入的 GEMV/GEMM 还要求 float 输出，不能直接将核心整数结果当作完整运算返回。
+未来接入需要在 CPU 或设备后处理层执行 FP16 scale 到 FP32 的转换、每组乘法和按组顺序的 FP32 累加；
 具体舍入和禁用 FMA 的要求见 `bnn-accelerator/bnn-accelerator.h`。
-公共软件 API 对 -128 的拒绝、内存范围检查、数据布局和字节序适配也由后端负责。
+公共 I8 路径对 -128 的拒绝、内存范围检查、数据布局和字节序适配也属于外层职责。
+F32 输入操作与 I8 输入操作分开定义；新增 F32 本轮仅有接口，soft 不支持，本核心也不实现浮点量化或还原。
+GGUF 格式不变，加载层的 repack 不迁移到 RTL。
 
-目前已接入 `ACCE=verilator`：`verilator-bnn-accelerator.c` 实现公共 API，
-`verilator-bnn-bridge.cpp` 通过 C ABI 封装生成的模型，逐周期驱动本核心。
-每个设备拥有自己的 `VerilatedContext` 和模型；GEMM 按输入行提交任务，激活在桥接层按输出通道重放。
-桥接层提交前检查配置，同时供数和收数，校验结果数量、组编号及边界标志，推进最后结果握手的时钟沿后，再核对收发计数及 `cmd_ready` 才返回成功，不额外等待完成周期。
-超时或桥接层检测到异常会复位模型并作废部分结果；默认周期预算由任务规模推导，桥接测试也可传入较小预算验证超时恢复。
-这些软件错误码由外层产生，并非核心错误通知。这只是进程内功能仿真，不模拟 DMA、总线延迟和真实存储带宽。构建和后端差分测试见仓库根 README。
+旧 Verilator 软件后端及 C++ 桥接已移除；根 Makefile 只接受 `ACCE=soft`。
+RTL 和下面的 Verilator 自检仍作为独立可选硬件验证保留，不通过软件 `BNN_*` API 驱动。
+后续硬件/IPC 接入、调度和数据传输设计不在本轮实现范围内。
 
-波形默认关闭。设置 `BNN_RTL_TRACE_DIR` 为已有可写目录后，每个新设备创建一个唯一的 VCD，
-记录复位、顶层和内部流水信号以及该设备上的所有计算任务；任务结束后刷新，关闭设备时完成文件。
-默认模型已编译 tracing 支持，无需为每次调试重新构建。
-时间单位为 1ps、时钟周期为 10ns，仅用于波形查看，不代表实现频率。
-可运行 `make -C tests/trace waves` 生成小型 DOT/GEMV 波形，
-或运行 `make -C tests/trace test` 只进行专项检查并自动清理临时文件。
+原软件后端的 VCD 导出机制及其专项测试已删除。当前 `bnn_core_test` Makefile 没有 `waves` 目标，
+testbench 也未启用 VCD 导出，因此下面的自检命令不会生成波形。
+`tools/wave-deck` 仍可读取已有 VCD 和仓库保留的示例；若需新波形，需另行给独立 testbench
+增加 tracing 支持，本轮不扩展测试基础设施。
 
 ## 测试
 
@@ -141,7 +143,8 @@ make -C bnn-hw/bnn_core_test test
 make -C bnn-hw/bnn_core_test lint
 ```
 
-测试采用 SystemVerilog 自检 testbench 和 Verilator，无需 cocotb 或 Python 虚拟环境。
+测试采用 SystemVerilog 自检 testbench 和 Verilator，需要相应 C++ 构建工具链，
+无需 cocotb 或 Python 虚拟环境，也不依赖根目录 engine/CLI 构建或 `tests/accelerator`。
 测试构建产物写入仓库的 `build/bnn-core-test/`，不写入 RTL 目录。
 默认运行 seed 1、7、42，每个 seed 执行定向用例和 16 个随机任务，日志为 `build/bnn-core-test/seed-<seed>.log`。
 `test` 还通过独立探针验证不支持的结构参数和非法配置会被仿真断言显式拒绝；探针必须运行到预期 assert 失败，非零退出是预期结果，编译失败不算通过。

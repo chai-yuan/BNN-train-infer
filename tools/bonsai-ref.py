@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """NumPy reference for the Qwen3/Q1_0 path used by bnn-sw-v2/qwen3/qwen3.c.
 
-The reference deliberately emulates the project's W1A8 contract:
+--activation a8 (default) emulates the project's W1A8 contract:
   * activations are quantized per row with absmax/127,
   * weights are Q1_0 (+-1 with one FP16 scale per 128 values),
   * each group dot is accumulated in FP32 in increasing group order,
   * host RMSNorm/RoPE/attention/SwiGLU stay in FP32.
+
+--activation a32 is the full-precision-activation reference: it keeps the same
+Q1_0 weights, FP16 scales and per-group FP32 accumulation, but skips activation
+quantization and the final activation-scale multiplication.
 
 The optional --out file uses the legacy BNR3 --ref layout for offline
 inspection; the current v2 CLI has no --ref option.  --topk prints the
@@ -161,35 +165,40 @@ def quantize_rows(x):
     x = np.asarray(x, dtype=np.float32)
     amax = np.max(np.abs(x), axis=1)
     scale = np.where(amax > 0.0, amax / np.float32(127.0), np.float32(1.0)).astype(np.float32)
+    scale = np.where((amax > 0.0) & (scale == 0.0),
+                     np.nextafter(np.float32(0.0), np.float32(1.0)), scale).astype(np.float32)
     y = x / scale[:, None]
     q = np.where(y >= 0.0, np.floor(y + np.float32(0.5)), np.ceil(y - np.float32(0.5)))
     q = np.clip(q, -127.0, 127.0).astype(np.int8)
     return q, scale
 
 
-def w1a8_linear(x, weight, scales, in_chunks=None):
+def w1_linear(x, weight, scales, activation_bits=8):
     """x [n,in] float32; weight [out,in] +-1; scales [out,in/128].
 
-    in_chunks mirrors the C backend's K-splitting (ffn_down is split at 4096).
-    The activation scale is applied per chunk, exactly like qwen3_linear().
+    activation_bits=32 is the full-precision-activation reference; 8 is W1A8.
     """
+    if activation_bits not in (8, 32):
+        raise ValueError(f"unsupported activation width {activation_bits}")
     rows = x.shape[0]
     out_dim, in_dim = weight.shape
     groups = in_dim // 128
-    q, activation_scale = quantize_rows(x)
+    if activation_bits == 8:
+        q, activation_scale = quantize_rows(x)
+        activation = q.astype(np.float32)
+    else:
+        activation = np.asarray(x, dtype=np.float32)
+        activation_scale = None
     result = np.zeros((rows, out_dim), dtype=np.float32)
-    cursor = 0
-    for count in (in_chunks or [groups]):
-        partial = np.zeros((rows, out_dim), dtype=np.float32)
-        for g in range(cursor, cursor + count):
-            begin = g * 128
-            q_group = q[:, begin:begin + 128].astype(np.float32)
-            w_group = weight[:, begin:begin + 128]
-            dots = q_group @ w_group.T
-            terms = (dots * scales[:, g][None, :]).astype(np.float32)
-            partial = (partial + terms).astype(np.float32)
-        result = (result + partial * activation_scale[:, None]).astype(np.float32)
-        cursor += count
+    for g in range(groups):
+        begin = g * 128
+        x_group = activation[:, begin:begin + 128]
+        w_group = weight[:, begin:begin + 128]
+        dots = x_group @ w_group.T
+        terms = (dots * scales[:, g][None, :]).astype(np.float32)
+        result = (result + terms).astype(np.float32)
+    if activation_scale is not None:
+        result = (result * activation_scale[:, None]).astype(np.float32)
     return result
 
 
@@ -235,8 +244,9 @@ def yarn_table(max_seq, head_dim, base, factor, original_context, scaling_type):
 
 
 class Qwen3Reference:
-    def __init__(self, path, max_seq=1024):
+    def __init__(self, path, max_seq=1024, activation_bits=8):
         self.mapping, self.meta, self.tensors, self.data_offset = parse_gguf(path)
+        self.activation_bits = activation_bits
         self.V = int(self.tensors["token_embd.weight"][0][1])
         self.C = int(self.meta["qwen3.embedding_length"])
         self.FF = int(self.meta["qwen3.feed_forward_length"])
@@ -267,6 +277,9 @@ class Qwen3Reference:
 
     def weight(self, name):
         return dequant_q1_0(self.mapping, self.data_offset, self.tensors, name)
+
+    def linear(self, x, weight, scales):
+        return w1_linear(x, weight, scales, self.activation_bits)
 
     def embedding(self, token):
         weight, scales = dequant_q1_0(self.mapping, self.data_offset, self.tensors,
@@ -314,7 +327,7 @@ class Qwen3Reference:
             end = min(self.V, start + 4096)
             weight, scales = dequant_q1_0(self.mapping, self.data_offset, self.tensors,
                                           "token_embd.weight", start, end)
-            logits[:, start:end] = w1a8_linear(x, weight, scales)
+            logits[:, start:end] = self.linear(x, weight, scales)
         return logits
 
     def forward(self, ids, dump_dir=None):
@@ -339,9 +352,9 @@ class Qwen3Reference:
             wq, sq = self.weight(prefix + "attn_q.weight")
             wk, sk = self.weight(prefix + "attn_k.weight")
             wv, sv = self.weight(prefix + "attn_v.weight")
-            q = w1a8_linear(norm, wq, sq)
-            k = w1a8_linear(norm, wk, sk)
-            v = w1a8_linear(norm, wv, sv)
+            q = self.linear(norm, wq, sq)
+            k = self.linear(norm, wk, sk)
+            v = self.linear(norm, wv, sv)
             for pos in range(min(2, n)):
                 dump(f"l{layer}_qproj", pos, q[pos])
                 dump(f"l{layer}_kproj", pos, k[pos])
@@ -361,7 +374,7 @@ class Qwen3Reference:
                 dump(f"l{layer}_y", pos, y[pos])
 
             wo, so = self.weight(prefix + "attn_output.weight")
-            x = (x + w1a8_linear(y, wo, so)).astype(np.float32)
+            x = (x + self.linear(y, wo, so)).astype(np.float32)
             for pos in range(min(2, n)):
                 dump(f"l{layer}_attnres", pos, x[pos])
 
@@ -369,17 +382,10 @@ class Qwen3Reference:
             wg, sg = self.weight(prefix + "ffn_gate.weight")
             wu, su = self.weight(prefix + "ffn_up.weight")
             wd, sd = self.weight(prefix + "ffn_down.weight")
-            gate = w1a8_linear(norm, wg, sg)
-            up = w1a8_linear(norm, wu, su)
+            gate = self.linear(norm, wg, sg)
+            up = self.linear(norm, wu, su)
             hidden = (gate / (np.float32(1.0) + np.exp(-gate)) * up).astype(np.float32)
-            down_groups = self.FF // 128
-            down_chunks = []
-            remaining = down_groups
-            while remaining > 32:
-                down_chunks.append(32)
-                remaining -= 32
-            down_chunks.append(remaining)
-            x = (x + w1a8_linear(hidden, wd, sd, in_chunks=down_chunks)).astype(np.float32)
+            x = (x + self.linear(hidden, wd, sd)).astype(np.float32)
             for pos in range(min(2, n)):
                 dump(f"l{layer}_ffnres", pos, x[pos])
 
@@ -403,10 +409,14 @@ def main():
     parser.add_argument("--out", required=True)
     parser.add_argument("--topk", type=int, default=3)
     parser.add_argument("--dump-dir", help="dump first two positions of intermediates")
+    parser.add_argument("--activation", choices=("a8", "a32"), default="a8",
+                        help="activation precision (default: a8)")
+    parser.add_argument("--quiet", action="store_true", help="suppress per-position top-k output")
     args = parser.parse_args()
 
     ids = read_ids(args)
-    reference = Qwen3Reference(args.model)
+    reference = Qwen3Reference(args.model, max_seq=max(len(ids), 1),
+                               activation_bits=8 if args.activation == "a8" else 32)
     logits = reference.forward(ids, dump_dir=args.dump_dir)
 
     with open(args.out, "wb") as out:
@@ -414,11 +424,12 @@ def main():
         out.write(np.asarray(ids, dtype="<i4").tobytes())
         out.write(logits.astype("<f4").tobytes())
 
-    for pos, token in enumerate(ids):
-        top = np.argsort(-logits[pos])[:args.topk]
-        print(f"position {pos} (id {token}): " +
-              ", ".join(f"{int(i)}:{logits[pos, i]:.4f}" for i in top))
-    print(f"wrote {args.out}: n={len(ids)} V={reference.V}")
+    if not args.quiet:
+        for pos, token in enumerate(ids):
+            top = np.argsort(-logits[pos])[:args.topk]
+            print(f"position {pos} (id {token}): " +
+                  ", ".join(f"{int(i)}:{logits[pos, i]:.4f}" for i in top))
+    print(f"wrote {args.out}: n={len(ids)} V={reference.V} activation={args.activation}")
 
 
 if __name__ == "__main__":

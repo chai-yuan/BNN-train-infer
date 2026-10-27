@@ -87,8 +87,9 @@ BNNE_Status bnne_linear_init(struct bnne_model* m, uint32_t in, uint32_t out_fea
     l->in = in;
     l->out = out_features;
 
-    if (m->caps.group_size != BNNE_Q1_0_GROUP)
-        return bnne_error(BNNE_ENOTSUP, "Q1_0 requires accelerator group size 128");
+    if (m->caps.group_size != BNNE_Q1_0_GROUP ||
+        !(m->caps.supported_ops & BNN_CAP_GEMV_F32))
+        return bnne_error(BNNE_ENOTSUP, "Q1_0 requires group size 128 and F32 GEMV support");
     if (in % BNNE_Q1_0_GROUP != 0)
         return bnne_error(BNNE_EFORMAT, "Q1_0 input width is not group aligned");
 
@@ -96,93 +97,36 @@ BNNE_Status bnne_linear_init(struct bnne_model* m, uint32_t in, uint32_t out_fea
     uint32_t max_out = m->caps.max_out_features;
     if (!max_in || !max_out)
         return bnne_error(BNNE_ENOTSUP, "accelerator does not report matrix limits");
+    if (in > max_in)
+        return bnne_error(BNNE_ENOTSUP, "Q1_0 input width %u exceeds accelerator limit %u", in,
+                          max_in);
 
-    if (in <= max_in && out_features <= max_out) {
-        l->n_chunks = 1;
-        l->chunks = calloc(1, sizeof *l->chunks);
-        if (!l->chunks)
-            return bnne_error(BNNE_ENOMEM, "out of memory");
-        l->chunks[0].in_len = in;
-        l->chunks[0].out_len = out_features;
-        BNNE_Status status = chunk_create(m, &l->chunks[0], in, out_features, bits, scales);
+    uint32_t count = out_features / max_out + (out_features % max_out != 0);
+    l->chunks = calloc(count, sizeof *l->chunks);
+    if (!l->chunks)
+        return bnne_error(BNNE_ENOMEM, "out of memory");
+    l->n_chunks = count;
+
+    size_t row_bytes = in / 8u;
+    size_t groups = in / BNNE_Q1_0_GROUP;
+    for (uint32_t c = 0; c < count; c++) {
+        bnne_linear_chunk* chunk = &l->chunks[c];
+        uint32_t out_off = c * max_out;
+        uint32_t out_len = out_features - out_off < max_out ? out_features - out_off : max_out;
+        chunk->out_off = out_off;
+        chunk->out_len = out_len;
+        BNNE_Status status = chunk_create(
+            m, chunk, in, out_len, bits + (size_t)out_off * row_bytes,
+            scales + (size_t)out_off * groups);
         if (status != BNNE_OK) {
             bnne_linear_free(l);
             return status;
         }
-        m->max_out = m->max_out > out_features ? m->max_out : out_features;
-    } else if (in <= max_in) {
-        uint32_t count = (out_features + max_out - 1) / max_out;
-        l->chunks = calloc(count, sizeof *l->chunks);
-        if (!l->chunks)
-            return bnne_error(BNNE_ENOMEM, "out of memory");
-        l->n_chunks = count;
-        for (uint32_t c = 0; c < count; c++) {
-            bnne_linear_chunk* chunk = &l->chunks[c];
-            uint32_t out_off = c * max_out;
-            uint32_t out_len = out_features - out_off < max_out ? out_features - out_off : max_out;
-            chunk->out_off = out_off;
-            chunk->out_len = out_len;
-            chunk->in_len = in;
-            BNNE_Status status = chunk_create(
-                m, chunk, in, out_len, bits + (size_t)out_off * (in / 8u),
-                scales + (size_t)out_off * (in / BNNE_Q1_0_GROUP));
-            if (status != BNNE_OK) {
-                bnne_linear_free(l);
-                return status;
-            }
-        }
-        m->max_out = m->max_out > max_out ? m->max_out : max_out;
-    } else if (out_features <= max_out) {
-        uint32_t step = max_in - max_in % BNNE_Q1_0_GROUP;
-        if (!step)
-            return bnne_error(BNNE_ENOTSUP, "accelerator input chunk is smaller than a Q1_0 group");
-        uint32_t count = (in + step - 1) / step;
-        l->chunks = calloc(count, sizeof *l->chunks);
-        if (!l->chunks)
-            return bnne_error(BNNE_ENOMEM, "out of memory");
-        l->n_chunks = count;
-        for (uint32_t c = 0; c < count; c++) {
-            bnne_linear_chunk* chunk = &l->chunks[c];
-            uint32_t in_off = c * step;
-            uint32_t in_len = in - in_off < step ? in - in_off : step;
-            size_t row_bytes = in_len / 8u;
-            size_t groups = in_len / BNNE_Q1_0_GROUP;
-            if (in_len % BNNE_Q1_0_GROUP != 0) {
-                bnne_linear_free(l);
-                return bnne_error(BNNE_ENOTSUP, "Q1_0 input chunk is not group aligned");
-            }
-            uint8_t* part_bits = alloc_array((size_t)out_features, row_bytes);
-            uint16_t* part_scales = alloc_array((size_t)out_features * groups, sizeof *part_scales);
-            if (!part_bits || !part_scales) {
-                free(part_bits);
-                free(part_scales);
-                bnne_linear_free(l);
-                return bnne_error(BNNE_ENOMEM, "out of memory");
-            }
-            for (uint32_t o = 0; o < out_features; o++) {
-                memcpy(part_bits + (size_t)o * row_bytes,
-                       bits + (size_t)o * (in / 8u) + in_off / 8u, row_bytes);
-                memcpy(part_scales + (size_t)o * groups,
-                       scales + (size_t)o * (in / BNNE_Q1_0_GROUP) + in_off / BNNE_Q1_0_GROUP,
-                       groups * sizeof *part_scales);
-            }
-            chunk->in_off = in_off;
-            chunk->in_len = in_len;
-            chunk->out_len = out_features;
-            BNNE_Status status = chunk_create(m, chunk, in_len, out_features, part_bits, part_scales);
-            free(part_bits);
-            free(part_scales);
-            if (status != BNNE_OK) {
-                bnne_linear_free(l);
-                return status;
-            }
-        }
-        m->max_out = m->max_out > out_features ? m->max_out : out_features;
-    } else {
-        return bnne_error(BNNE_ENOTSUP, "Q1_0 weight exceeds both accelerator chunk limits");
     }
 
     m->max_in = m->max_in > in ? m->max_in : in;
+    uint32_t chunk_max = out_features < max_out ? out_features : max_out;
+    m->max_out = m->max_out > chunk_max ? m->max_out : chunk_max;
     return BNNE_OK;
 }
 
@@ -215,69 +159,58 @@ void bnne_linear_free(bnne_linear* l) {
 }
 
 BNNE_Status bnne_linear_forward(struct bnne_context* c, const bnne_linear* l, const float* x,
-                                uint32_t rows, float* y) {
-    if (!c || !l || !x || !y || rows == 0 || !c->qbuf || !c->chunk || !c->in_buf || !c->out_buf)
+                                float* y) {
+    if (!c || !l || !x || !y || !c->in_buf || !c->out_buf)
         return BNNE_EINVAL;
 
     int stats = c->params.enable_stats;
-    for (uint32_t r = 0; r < rows; r++) {
-        float scale = 0.0f;
-        uint64_t start = stats ? bnne_now_ns() : 0;
-        BNNE_Status status = bnne_quantize(x + (size_t)r * l->in, l->in, c->qbuf, &scale);
+    size_t input_bytes = (size_t)l->in * sizeof(float);
+    uint64_t start = stats ? bnne_now_ns() : 0;
+    BNNE_Status status = bnne_accel_error(
+        BNN_BufferWrite(c->in_buf, 0, x, input_bytes), "BNN_BufferWrite");
+    if (stats) {
+        c->stats.transfer_ns += bnne_now_ns() - start;
+        c->stats.bytes_written += input_bytes;
+    }
+    if (status != BNNE_OK)
+        return status;
+
+    for (uint32_t i = 0; i < l->n_chunks; i++) {
+        const bnne_linear_chunk* chunk = &l->chunks[i];
+        size_t output_bytes = (size_t)chunk->out_len * sizeof(float);
+
+        BNN_Job job = {0};
+        job.operation = BNN_OP_GEMV_F32;
+        job.matrix = chunk->matrix;
+        job.input.buffer = c->in_buf;
+        job.input.type = BNN_TYPE_F32;
+        job.output.buffer = c->out_buf;
+        job.output.type = BNN_TYPE_F32;
+        job.rows = 1;
+
+        start = stats ? bnne_now_ns() : 0;
+        status = bnne_accel_error(BNN_Execute(c->model->device, &job), "BNN_Execute");
         if (stats)
-            c->stats.quantize_ns += bnne_now_ns() - start;
+            c->stats.execute_ns += bnne_now_ns() - start;
         if (status != BNNE_OK)
-            return bnne_error(status, "activation quantization failed");
+            return status;
 
-        memset(y + (size_t)r * l->out, 0, (size_t)l->out * sizeof(float));
-        for (uint32_t i = 0; i < l->n_chunks; i++) {
-            const bnne_linear_chunk* chunk = &l->chunks[i];
-            size_t input_bytes = chunk->in_len;
-            size_t output_bytes = (size_t)chunk->out_len * sizeof(float);
-
-            start = stats ? bnne_now_ns() : 0;
-            status = bnne_accel_error(
-                BNN_BufferWrite(c->in_buf, 0, c->qbuf + chunk->in_off, input_bytes),
-                "BNN_BufferWrite");
-            if (stats)
-                c->stats.transfer_ns += bnne_now_ns() - start;
-            if (status != BNNE_OK)
-                return status;
-
-            BNN_Job job = {0};
-            job.operation = BNN_OP_GEMV;
-            job.matrix = chunk->matrix;
-            job.input = c->in_buf;
-            job.output = c->out_buf;
-            job.rows = 1;
-
-            start = stats ? bnne_now_ns() : 0;
-            status = bnne_accel_error(BNN_Execute(c->model->device, &job), "BNN_Execute");
-            if (stats)
-                c->stats.execute_ns += bnne_now_ns() - start;
-            if (status != BNNE_OK)
-                return status;
-
-            start = stats ? bnne_now_ns() : 0;
-            status = bnne_accel_error(
-                BNN_BufferRead(c->out_buf, 0, c->chunk, output_bytes), "BNN_BufferRead");
-            if (stats) {
-                c->stats.transfer_ns += bnne_now_ns() - start;
-                c->stats.device_calls++;
-                c->stats.bytes_written += input_bytes;
-                c->stats.bytes_read += output_bytes;
-            }
-            if (status != BNNE_OK)
-                return status;
-
-            for (uint32_t j = 0; j < chunk->out_len; j++)
-                y[(size_t)r * l->out + chunk->out_off + j] += c->chunk[j] * scale;
-        }
+        start = stats ? bnne_now_ns() : 0;
+        status = bnne_accel_error(
+            BNN_BufferRead(c->out_buf, 0, y + chunk->out_off, output_bytes), "BNN_BufferRead");
         if (stats) {
-            uint64_t macs = (uint64_t)l->in * l->out;
-            c->stats.logical_macs += macs;
-            c->stats.executed_macs += macs;
+            c->stats.transfer_ns += bnne_now_ns() - start;
+            c->stats.device_calls++;
+            c->stats.bytes_read += output_bytes;
         }
+        if (status != BNNE_OK)
+            return status;
+    }
+
+    if (stats) {
+        uint64_t macs = (uint64_t)l->in * l->out;
+        c->stats.logical_macs += macs;
+        c->stats.executed_macs += macs;
     }
     return BNNE_OK;
 }

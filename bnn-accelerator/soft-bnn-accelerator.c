@@ -3,6 +3,7 @@
 #include <fenv.h>
 #include <float.h>
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,7 +19,7 @@
 #error "Compile this backend without fast-math."
 #endif
 
-#define SOFT_MAX_FEATURES 4096u
+#define SOFT_MAX_FEATURES 8192u
 #define SOFT_GROUP_SIZE 128u
 #define SOFT_MAX_GROUPS (SOFT_MAX_FEATURES / SOFT_GROUP_SIZE)
 
@@ -119,7 +120,10 @@ static float HalfToFloat(uint16_t h) {
     return result;
 }
 
-/* 分别建立 FP32 舍入点，避免乘加融合。 */
+/*
+ * 每次运算单独建立 FP32 舍入点。
+ * volatile 强制在每一步之后舍入，配合 -ffp-contract=off 避免融合乘加。
+ */
 static float FloatMultiply(float a, float b) {
     volatile float result = a * b;
     return result;
@@ -128,6 +132,179 @@ static float FloatMultiply(float a, float b) {
 static float FloatAdd(float a, float b) {
     volatile float result = a + b;
     return result;
+}
+
+static float FloatDivide(float a, float b) {
+    volatile float result = a / b;
+    return result;
+}
+
+/* 视图允许非对齐 offset/stride，按字节拷贝解释 FP32。 */
+static float LoadFloat(const unsigned char* p) {
+    float value;
+    memcpy(&value, p, sizeof value);
+    return value;
+}
+
+static void StoreFloat(unsigned char* p, float value) {
+    memcpy(p, &value, sizeof value);
+}
+
+static BNN_Status OperationTypes(BNN_Operation operation, BNN_Type* input, BNN_Type* output) {
+    switch (operation) {
+    case BNN_OP_GEMV:
+    case BNN_OP_GEMM:
+        *input = BNN_TYPE_I8;
+        *output = BNN_TYPE_F32;
+        return BNN_OK;
+    case BNN_OP_DOT_GROUPS:
+        *input = BNN_TYPE_I8;
+        *output = BNN_TYPE_I16;
+        return BNN_OK;
+    case BNN_OP_GEMV_F32:
+    case BNN_OP_GEMM_F32:
+        *input = BNN_TYPE_F32;
+        *output = BNN_TYPE_F32;
+        return BNN_OK;
+    default:
+        return BNN_ENOTSUP;
+    }
+}
+
+/* 完整逻辑行做 absmax 对称量化；输入已在 Execute 中确认有限。 */
+static float QuantizeRow(const unsigned char* row, uint32_t count, int8_t* quantized) {
+    float absmax = 0.0f;
+    float scale;
+    uint32_t i;
+
+    for (i = 0; i < count; ++i) {
+        float value = fabsf(LoadFloat(row + (size_t)i * sizeof(float)));
+
+        if (value > absmax)
+            absmax = value;
+    }
+
+    if (absmax == 0.0f) {
+        scale = 1.0f;
+    } else {
+        scale = FloatDivide(absmax, 127.0f);
+
+        /* a / 127 在 binary32 中下溢为零时使用最小正次正规数。 */
+        if (scale == 0.0f)
+            scale = FLT_TRUE_MIN;
+    }
+
+    for (i = 0; i < count; ++i) {
+        float value = FloatDivide(LoadFloat(row + (size_t)i * sizeof(float)), scale);
+        /* roundf 是半整数远离零，且不受当前舍入方向影响。 */
+        float rounded = roundf(value);
+
+        if (rounded > 127.0f)
+            rounded = 127.0f;
+        else if (rounded < -127.0f)
+            rounded = -127.0f;
+
+        quantized[i] = (int8_t)rounded;
+    }
+
+    return scale;
+}
+
+/*
+ * 计算一行输入。
+ * 参数和全部输入已由 Execute 检查，此处不再产生可恢复错误。
+ *
+ * 输出使用 memcpy，避免非对齐 INT16/FP32 指针访问。
+ */
+static void ComputeRow(BNN_Matrix matrix, const int8_t* x, unsigned char* y, BNN_Operation operation,
+                       float activation_scale, int has_activation_scale) {
+    int32_t totals[SOFT_MAX_GROUPS];
+    size_t weight_row_bytes = matrix->in_features / 8u;
+    uint32_t n, g, k;
+
+    /* 每组激活总和只算一次，供所有输出通道共享。 */
+    for (g = 0; g < matrix->groups; ++g) {
+        uint32_t begin = g * SOFT_GROUP_SIZE;
+        int32_t total = 0;
+
+        for (k = begin; k < begin + SOFT_GROUP_SIZE; ++k)
+            total += (int32_t)x[k];
+
+        totals[g] = total;
+    }
+
+    for (n = 0; n < matrix->out_features; ++n) {
+        const uint8_t* w = matrix->weight_bits + (size_t)n * weight_row_bytes;
+        float acc = 0.0f;
+
+        for (g = 0; g < matrix->groups; ++g) {
+            uint32_t begin = g * SOFT_GROUP_SIZE;
+            size_t index = (size_t)n * matrix->groups + g;
+            int32_t pos = 0;
+            int32_t dot;
+
+            for (k = begin; k < begin + SOFT_GROUP_SIZE; ++k) {
+                if ((w[k >> 3] >> (k & 7u)) & 1u)
+                    pos += (int32_t)x[k];
+            }
+
+            /*
+             * 正权重位置之和减去负权重位置之和：
+             * dot = pos - (total - pos)。
+             *
+             * G=128、输入范围 [-127,127] 时，
+             * 最终结果范围为 [-16256,16256]。
+             */
+            dot = 2 * pos - totals[g];
+
+            if (operation == BNN_OP_DOT_GROUPS) {
+                int16_t result = (int16_t)dot;
+                memcpy(y + index * sizeof result, &result, sizeof result);
+            } else {
+                float scale = HalfToFloat(matrix->scale_fp16[index]);
+                float term = FloatMultiply(scale, (float)dot);
+
+                acc = FloatAdd(acc, term);
+            }
+        }
+
+        if (operation != BNN_OP_DOT_GROUPS) {
+            float result = has_activation_scale ? FloatMultiply(acc, activation_scale) : acc;
+            StoreFloat(y + (size_t)n * sizeof result, result);
+        }
+    }
+}
+
+static BNN_Status ValidateI8Input(const unsigned char* data, size_t offset, size_t stride, uint32_t rows,
+                                  uint32_t count) {
+    uint32_t m, k;
+
+    for (m = 0; m < rows; ++m) {
+        const int8_t* x = (const int8_t*)(data + offset + (size_t)m * stride);
+
+        for (k = 0; k < count; ++k) {
+            if (x[k] == INT8_MIN)
+                return BNN_ERANGE;
+        }
+    }
+
+    return BNN_OK;
+}
+
+static BNN_Status ValidateF32Input(const unsigned char* data, size_t offset, size_t stride, uint32_t rows,
+                                   uint32_t count) {
+    uint32_t m, k;
+
+    for (m = 0; m < rows; ++m) {
+        const unsigned char* row = data + offset + (size_t)m * stride;
+
+        for (k = 0; k < count; ++k) {
+            if (!isfinite(LoadFloat(row + (size_t)k * sizeof(float))))
+                return BNN_ERANGE;
+        }
+    }
+
+    return BNN_OK;
 }
 
 BNN_Status BNN_DeviceOpen(uint32_t device_index, BNN_Device* out_device) {
@@ -172,9 +349,8 @@ BNN_Status BNN_DeviceGetCaps(BNN_Device device, BNN_Caps* out_caps) {
     out_caps->max_out_features = SOFT_MAX_FEATURES;
     out_caps->max_rows = UINT32_MAX;
     out_caps->group_size = SOFT_GROUP_SIZE;
-    out_caps->supports_gemv = 1;
-    out_caps->supports_gemm = 1;
-    out_caps->supports_dot_groups = 1;
+    out_caps->supported_ops = BNN_CAP_GEMV | BNN_CAP_GEMM | BNN_CAP_DOT_GROUPS | BNN_CAP_GEMV_F32 |
+                              BNN_CAP_GEMM_F32;
 
     return BNN_OK;
 }
@@ -194,7 +370,8 @@ BNN_Status BNN_MatrixCreate(BNN_Device device, const BNN_MatrixDesc* desc, BNN_M
     if (device == NULL || desc == NULL)
         return BNN_EINVAL;
 
-    if (desc->in_features == 0 || desc->out_features == 0 || desc->group_size == 0)
+    if (desc->in_features == 0 || desc->out_features == 0 || desc->group_size == 0 ||
+        desc->group_size > 256u || desc->group_size % 8u != 0)
         return BNN_EINVAL;
 
     if (desc->in_features > SOFT_MAX_FEATURES || desc->out_features > SOFT_MAX_FEATURES ||
@@ -333,120 +510,63 @@ BNN_Status BNN_BufferRead(BNN_Buffer buffer, size_t offset, void* dst, size_t by
     return BNN_OK;
 }
 
-/*
- * 计算一行输入。
- * 参数和全部输入已由 Execute 检查，此处不再产生可恢复错误。
- *
- * 输出使用 memcpy，避免非对齐 INT32/FP32 指针访问。
- */
-static void ComputeRow(BNN_Matrix matrix, const int8_t* x, unsigned char* y, BNN_Operation operation) {
-    int32_t totals[SOFT_MAX_GROUPS];
-    size_t weight_row_bytes = matrix->in_features / 8u;
-    uint32_t n, g, k;
-
-    /* 每组激活总和只算一次，供所有输出通道共享。 */
-    for (g = 0; g < matrix->groups; ++g) {
-        uint32_t begin = g * SOFT_GROUP_SIZE;
-        int32_t total = 0;
-
-        for (k = begin; k < begin + SOFT_GROUP_SIZE; ++k)
-            total += (int32_t)x[k];
-
-        totals[g] = total;
-    }
-
-    for (n = 0; n < matrix->out_features; ++n) {
-        const uint8_t* w = matrix->weight_bits + (size_t)n * weight_row_bytes;
-        float acc = 0.0f;
-
-        for (g = 0; g < matrix->groups; ++g) {
-            uint32_t begin = g * SOFT_GROUP_SIZE;
-            size_t index = (size_t)n * matrix->groups + g;
-            int32_t pos = 0;
-            int32_t dot;
-
-            for (k = begin; k < begin + SOFT_GROUP_SIZE; ++k) {
-                if ((w[k >> 3] >> (k & 7u)) & 1u)
-                    pos += (int32_t)x[k];
-            }
-
-            /*
-             * 正权重位置之和减去负权重位置之和：
-             * dot = pos - (total - pos)。
-             *
-             * G=128、输入范围 [-127,127] 时，
-             * 最终结果范围为 [-16256,16256]。
-             */
-            dot = 2 * pos - totals[g];
-
-            if (operation == BNN_OP_DOT_GROUPS) {
-                memcpy(y + index * sizeof dot, &dot, sizeof dot);
-            } else {
-                float scale = HalfToFloat(matrix->scale_fp16[index]);
-                float term = FloatMultiply(scale, (float)dot);
-
-                acc = FloatAdd(acc, term);
-            }
-        }
-
-        if (operation != BNN_OP_DOT_GROUPS)
-            memcpy(y + (size_t)n * sizeof acc, &acc, sizeof acc);
-    }
-}
-
 BNN_Status BNN_Execute(BNN_Device device, const BNN_Job* job) {
     BNN_Matrix matrix;
+    BNN_Type input_type;
+    BNN_Type output_type;
+    size_t input_element_bytes;
     size_t input_row_bytes;
     size_t output_row_bytes;
     size_t output_elements;
     size_t input_stride;
     size_t output_stride;
-    uint32_t m, k;
+    int8_t quantized[SOFT_MAX_FEATURES];
+    uint32_t m;
+    BNN_Status status;
 
-    if (device == NULL || job == NULL || job->matrix == NULL || job->input == NULL || job->output == NULL ||
-        job->rows == 0)
+    if (device == NULL || job == NULL || job->matrix == NULL || job->input.buffer == NULL ||
+        job->output.buffer == NULL || job->rows == 0)
         return BNN_EINVAL;
 
-    switch (job->operation) {
-    case BNN_OP_GEMV:
-        if (job->rows != 1)
-            return BNN_EINVAL;
-        break;
+    status = OperationTypes(job->operation, &input_type, &output_type);
 
-    case BNN_OP_GEMM:
-    case BNN_OP_DOT_GROUPS:
-        break;
+    if (status != BNN_OK)
+        return status;
 
-    default:
-        return BNN_ENOTSUP;
-    }
+    if ((job->operation == BNN_OP_GEMV || job->operation == BNN_OP_GEMV_F32) && job->rows != 1)
+        return BNN_EINVAL;
+
+    if (job->input.type != input_type || job->output.type != output_type)
+        return BNN_EINVAL;
 
     matrix = job->matrix;
 
-    if (matrix->owner != device || job->input->owner != device || job->output->owner != device ||
-        job->input == job->output)
+    if (matrix->owner != device || job->input.buffer->owner != device || job->output.buffer->owner != device ||
+        job->input.buffer == job->output.buffer)
         return BNN_EINVAL;
 
-    input_row_bytes = matrix->in_features;
+    input_element_bytes = input_type == BNN_TYPE_F32 ? sizeof(float) : sizeof(int8_t);
+
+    if (!SizeMultiply(matrix->in_features, input_element_bytes, &input_row_bytes))
+        return BNN_ERANGE;
 
     if (job->operation == BNN_OP_DOT_GROUPS) {
         if (!SizeMultiply(matrix->out_features, matrix->groups, &output_elements) ||
-            !SizeMultiply(output_elements, sizeof(int32_t), &output_row_bytes))
+            !SizeMultiply(output_elements, sizeof(int16_t), &output_row_bytes))
             return BNN_ERANGE;
     } else {
         if (!SizeMultiply(matrix->out_features, sizeof(float), &output_row_bytes))
             return BNN_ERANGE;
     }
 
-    input_stride = job->input_row_stride != 0 ? job->input_row_stride : input_row_bytes;
-
-    output_stride = job->output_row_stride != 0 ? job->output_row_stride : output_row_bytes;
+    input_stride = job->input.row_stride != 0 ? job->input.row_stride : input_row_bytes;
+    output_stride = job->output.row_stride != 0 ? job->output.row_stride : output_row_bytes;
 
     if (input_stride < input_row_bytes || output_stride < output_row_bytes)
         return BNN_EINVAL;
 
-    if (!RowsFit(job->input->bytes, job->input_offset, input_stride, input_row_bytes, job->rows) ||
-        !RowsFit(job->output->bytes, job->output_offset, output_stride, output_row_bytes, job->rows))
+    if (!RowsFit(job->input.buffer->bytes, job->input.offset, input_stride, input_row_bytes, job->rows) ||
+        !RowsFit(job->output.buffer->bytes, job->output.offset, output_stride, output_row_bytes, job->rows))
         return BNN_ERANGE;
 
     if (job->operation != BNN_OP_DOT_GROUPS && fegetround() != FE_TONEAREST)
@@ -456,21 +576,27 @@ BNN_Status BNN_Execute(BNN_Device device, const BNN_Job* job) {
      * 先检查所有行，再开始写输出。
      * 即使最后一行包含非法输入，也不会留下部分计算结果。
      */
-    for (m = 0; m < job->rows; ++m) {
-        const int8_t* x = (const int8_t*)(job->input->data + job->input_offset + (size_t)m * input_stride);
+    if (input_type == BNN_TYPE_F32)
+        status = ValidateF32Input(job->input.buffer->data, job->input.offset, input_stride, job->rows,
+                                  matrix->in_features);
+    else
+        status = ValidateI8Input(job->input.buffer->data, job->input.offset, input_stride, job->rows,
+                                 matrix->in_features);
 
-        for (k = 0; k < matrix->in_features; ++k) {
-            if (x[k] == INT8_MIN)
-                return BNN_ERANGE;
+    if (status != BNN_OK)
+        return status;
+
+    for (m = 0; m < job->rows; ++m) {
+        const unsigned char* in_row = job->input.buffer->data + job->input.offset + (size_t)m * input_stride;
+        unsigned char* out_row = job->output.buffer->data + job->output.offset + (size_t)m * output_stride;
+
+        if (input_type == BNN_TYPE_F32) {
+            float scale = QuantizeRow(in_row, matrix->in_features, quantized);
+
+            ComputeRow(matrix, quantized, out_row, job->operation, scale, 1);
+        } else {
+            ComputeRow(matrix, (const int8_t*)in_row, out_row, job->operation, 0.0f, 0);
         }
-    }
-
-    for (m = 0; m < job->rows; ++m) {
-        const int8_t* x = (const int8_t*)(job->input->data + job->input_offset + (size_t)m * input_stride);
-
-        unsigned char* y = job->output->data + job->output_offset + (size_t)m * output_stride;
-
-        ComputeRow(matrix, x, y, job->operation);
     }
 
     return BNN_OK;

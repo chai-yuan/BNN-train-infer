@@ -20,24 +20,22 @@ make serve
 直接双击 `index.html` 也能解析拖入的 VCD；只有「载入示例」需要通过 HTTP 读取
 `samples/demo.vcd`。
 
-## 生成波形
+## 波形来源与独立硬件自检
 
-在仓库根目录：
+旧 Verilator 软件后端、C++ 桥接及软件波形开关测试已移除，根构建只支持 `ACCE=soft`；
+不能再通过推理 CLI 或加速器测试生成 VCD。本工具、`samples/demo.vcd`、测试 fixtures
+和字体资源仍保留，可直接载入示例或打开已有波形，不依赖软件后端。
+
+独立的 RTL 自检仍可在仓库根目录按需运行（需要 Verilator 及其 C++ 构建工具链）：
 
 ```sh
-# 小型专项 DOT/GEMV 波形，输出 build/waves/*.vcd
-make -C tests/trace waves
-
-# 加速器差分测试波形，输出 build/waves/accelerator/*.vcd
-make -C tests/accelerator waves
-
-# 任意推理命令
-mkdir -p build/model-waves
-BNN_RTL_TRACE_DIR="$PWD/build/model-waves" ./bnn-infer --profile model.bnn
+make -C bnn-hw/bnn_core_test test
+make -C bnn-hw/bnn_core_test lint
 ```
 
-`BNN_RTL_TRACE_DIR` 指向已有可写目录时，每个设备生成一个独立 VCD。完整模型
-波形可能很大；先用小型任务调试。
+已核实当前 `bnn_core_test` 没有 `waves` 目标，testbench 也没有 VCD 导出逻辑；
+上述命令只自检/检查 RTL，不生成波形。生成新波形需另行给独立 testbench 增加 tracing 支持，
+本轮不实现，也不提供失效的软件后端生成命令。
 
 ## 观测内容
 
@@ -62,9 +60,11 @@ reset 取消任务并清空配置、计数和反压检查状态，不生成完�
 - CMD / 首对输入同沿、末结果 / 下一命令同沿、复位取消、孤儿握手、任务未完成等情况。
 
 非法配置由外层保证不提交，RTL 仿真 assert；分析器只对错误波形给出诊断，
-不虚构配置错误响应。新接口没有 `ctrl_abort`、`done_*`、`res_error`，也没有
+不虚构配置错误响应。当前 RTL 物理接口没有 `ctrl_abort`、`done_*`、`res_error`，也没有
 独立 ACT/WGT 的 valid/ready 或物理 `act_last/weight_last`。
 这些检查只在顶层可见信号上完成，不读取内部状态或参考模型。
+这里的 int32 结果对应旧 RTL 的 `res_data[31:0]` 物理协议，和公共 API v2
+`DOT_GROUPS` 的 I16 输出解耦；本工具继续按物理端口解析，本轮无需修改 RTL 或解析器。
 
 ### 采样语义
 
@@ -140,9 +140,10 @@ tools/wave-deck/
 - reset 任务保留 `status: 'reset'`，`doneCycle` / `completionSource` 为 `null`，没有 DONE 事件。
   不再产生配置错误、abort 或协议错误的硬件完成状态；协议问题记录在 `issues` / `warnings`。
 
-`samples/demo.vcd` 来自当前已编译新 RTL，通过公共 BNN API 执行两个 K128/N2/G128
-任务（DOT_GROUPS、GEMV）。28 个上升沿，16 次配对输入、4 次结果握手，两个任务
-分别在周期 14 / 27 完成；原始结果为 `[128, -128]`，无合成的旧端口。
+`samples/demo.vcd` 是保留的 RTL 波形 fixture，含两个 K128/N2/G128 任务。
+28 个上升沿，16 次配对输入、4 次结果握手，两个任务分别在周期 14 / 27 完成；
+原始结果为 `[128, -128]`。它只作为物理协议解析和界面演示数据，
+不表示当前仍有可用的软件 Verilator 后端或公共 API 生成路径。
 
 ## 边界
 
@@ -166,4 +167,4 @@ make test
 三通道反压稳定性、末结果阻塞不提前完成、下一拍命令、reset 取消与清理、缺失新端口、
 事件上限下的完成统计、非法配置诊断，以及真实新 RTL 示例的计数与 lane 解码。
 字体使用 Fusion Pixel（SIL Open Font License 1.1，许可证见
-`assets/fonts/OFL-fusion-pixel.txt`）。
+`assets/fonts/OFL-fusion-pixel.txt`）；这些字体也供 `tools/gguf-lens` 共用，不随旧后端清理删除。

@@ -69,12 +69,13 @@ typedef struct {
 
 typedef struct {
     uint32_t n_ctx;   /* LLM：KV Cache 容量（token 数），0 表示 n_ctx_train；分类任务忽略 */
-    uint32_t n_batch; /* 单次调用的最大 token 数或样本数，决定工作区大小；0 表示默认值 */
+    uint32_t n_batch; /* 单次调用的最大 token 数或样本数；0 表示默认值 */
     int enable_stats; /* 默认 1 */
 } BNNE_ContextParams;
 
 /*
  * 单调墙钟纳秒，只累计成功的 Classify/Decode。
+ * quantize_ns 仅在主机侧量化时非零；soft 在设备内量化，因此恒为 0。
  * total_ns = quantize_ns + transfer_ns + execute_ns + host_ns。
  * logical_macs 按有效尺寸计算，executed_macs 按设备实际执行的尺寸计算。
  */

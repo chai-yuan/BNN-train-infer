@@ -187,11 +187,10 @@ static BNNE_Status qwen3_load(struct bnne_model* m, const bnne_gguf* g, void** o
         qwen3_unload(model);
         return bnne_error(BNNE_EFORMAT, "Qwen3 KV width is not group aligned");
     }
-    if (m->caps.group_size != QWEN3_GROUP || !m->caps.supports_gemv ||
-        !m->caps.supports_gemm) {
+    if (m->caps.group_size != QWEN3_GROUP || !(m->caps.supported_ops & BNN_CAP_GEMV_F32)) {
         qwen3_unload(model);
         return bnne_error(BNNE_ENOTSUP,
-                          "Qwen3 requires group 128 with GEMV/GEMM support");
+                          "Qwen3 requires group 128 with F32 GEMV support");
     }
 
     model->blocks = calloc(model->L, sizeof *model->blocks);
@@ -409,11 +408,11 @@ static BNNE_Status qwen3_step(struct bnne_context* c, uint32_t token, uint32_t p
         BNNE_Status status = qwen3_rmsnorm(s->x, model->C, model->eps, block->attn_norm,
                                            s->norm);
         if (status != BNNE_OK) return status;
-        status = bnne_linear_forward(c, &block->wq, s->norm, 1, s->q);
+        status = bnne_linear_forward(c, &block->wq, s->norm, s->q);
         if (status != BNNE_OK) return status;
-        status = bnne_linear_forward(c, &block->wk, s->norm, 1, s->k);
+        status = bnne_linear_forward(c, &block->wk, s->norm, s->k);
         if (status != BNNE_OK) return status;
-        status = bnne_linear_forward(c, &block->wv, s->norm, 1, s->v);
+        status = bnne_linear_forward(c, &block->wv, s->norm, s->v);
         if (status != BNNE_OK) return status;
 
         for (uint32_t h = 0; h < model->H; h++) {
@@ -478,23 +477,23 @@ static BNNE_Status qwen3_step(struct bnne_context* c, uint32_t token, uint32_t p
             }
         }
 
-        status = bnne_linear_forward(c, &block->wo, s->y, 1, s->o);
+        status = bnne_linear_forward(c, &block->wo, s->y, s->o);
         if (status != BNNE_OK) return status;
         for (uint32_t i = 0; i < model->C; i++)
             s->x[i] += s->o[i];
 
         status = qwen3_rmsnorm(s->x, model->C, model->eps, block->ffn_norm, s->norm);
         if (status != BNNE_OK) return status;
-        status = bnne_linear_forward(c, &block->gate, s->norm, 1, s->gate);
+        status = bnne_linear_forward(c, &block->gate, s->norm, s->gate);
         if (status != BNNE_OK) return status;
-        status = bnne_linear_forward(c, &block->up, s->norm, 1, s->up);
+        status = bnne_linear_forward(c, &block->up, s->norm, s->up);
         if (status != BNNE_OK) return status;
         for (uint32_t i = 0; i < model->FF; i++) {
             float value = s->gate[i];
             float silu = value / (1.0f + expf(-value));
             s->gate[i] = silu * s->up[i];
         }
-        status = bnne_linear_forward(c, &block->down, s->gate, 1, s->o);
+        status = bnne_linear_forward(c, &block->down, s->gate, s->o);
         if (status != BNNE_OK) return status;
         for (uint32_t i = 0; i < model->C; i++)
             s->x[i] += s->o[i];
@@ -505,7 +504,7 @@ static BNNE_Status qwen3_step(struct bnne_context* c, uint32_t token, uint32_t p
                                            s->norm);
         if (status != BNNE_OK)
             return status;
-        status = bnne_linear_forward(c, &model->lm_head, s->norm, 1, logits);
+        status = bnne_linear_forward(c, &model->lm_head, s->norm, logits);
         if (status != BNNE_OK)
             return status;
     }

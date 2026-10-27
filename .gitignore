@@ -2,6 +2,7 @@ data/
 local-notes/
 
 bnn-infer-v2
+tools/precision/dump-logits
 build/
 *.o
 *.out

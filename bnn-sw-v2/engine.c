@@ -176,25 +176,19 @@ BNNE_Status BNNE_ContextCreate(BNNE_Model model, const BNNE_ContextParams* param
 
     c->max_in = model->max_in ? model->max_in : 1;
     c->max_out = model->max_out ? model->max_out : 1;
-    if ((uint64_t)c->max_in * c->params.n_batch > SIZE_MAX ||
-        (uint64_t)c->max_out * c->params.n_batch > SIZE_MAX / sizeof(float)) {
+    if ((uint64_t)c->max_in * sizeof(float) > SIZE_MAX ||
+        (uint64_t)c->max_out * sizeof(float) > SIZE_MAX) {
         BNNE_ContextFree(c);
         return bnne_error(BNNE_ERANGE, "context workspace is too large");
     }
-    size_t input_bytes = (size_t)c->max_in * c->params.n_batch;
-    size_t output_bytes = (size_t)c->max_out * c->params.n_batch * sizeof(float);
+    size_t input_bytes = (size_t)c->max_in * sizeof(float);
+    size_t output_bytes = (size_t)c->max_out * sizeof(float);
 
     BNNE_Status status = bnne_accel_error(
         BNN_BufferAlloc(model->device, input_bytes, &c->in_buf), "BNN_BufferAlloc(input)");
     if (status == BNNE_OK)
         status = bnne_accel_error(
             BNN_BufferAlloc(model->device, output_bytes, &c->out_buf), "BNN_BufferAlloc(output)");
-    if (status == BNNE_OK) {
-        c->qbuf = malloc(c->max_in);
-        c->chunk = malloc((size_t)c->max_out * sizeof(float));
-        if (!c->qbuf || !c->chunk)
-            status = bnne_error(BNNE_ENOMEM, "out of memory");
-    }
     if (status != BNNE_OK) {
         BNNE_ContextFree(c);
         return status;
@@ -212,8 +206,6 @@ void BNNE_ContextFree(BNNE_Context c) {
         c->model->arch->ctx_free(c->state);
     BNN_BufferFree(c->in_buf);
     BNN_BufferFree(c->out_buf);
-    free(c->qbuf);
-    free(c->chunk);
     free(c);
 }
 
