@@ -1,114 +1,57 @@
+# Minimal Verilator test flow for the BNN v2 simulation top.
 VERILATOR ?= verilator
-CXX ?= g++
-PYTHON ?= python3
-JOBS ?= 2
-DMA_WIDTH ?= 128
-BUILD := build
-SIM_DIR := $(abspath .)
+PYTHON    ?= python3
+JOBS      ?= 2
+SEED      ?= 1
+
+BUILD     := build
+DATA_DIR  := tests/case
+TEST_DIR  := $(BUILD)/testdata
+SIM       := $(BUILD)/Vbnn_sim_top
+
 FP_PACKAGE := ../bnn_core/bnn_fp_math.sv
-CORE_RTL := $(FP_PACKAGE) $(sort $(filter-out $(FP_PACKAGE),$(wildcard ../bnn_core/*.sv)))
-HEADERS := $(wildcard include/*.hpp)
-VFLAGS := --cc --exe --build --assert --trace -Wall -j $(JOBS)
-VFLAGS_COMB := --cc --exe --build --assert -Wall -j $(JOBS)
-CXXFLAGS_SIM := -std=c++17 -Wall -Wextra -fno-fast-math -ffp-contract=off -I$(SIM_DIR)/include
-DMA_EXE := $(BUILD)/dma-$(DMA_WIDTH)/Vbnn_dma_memory
-FP_TEST_EXE := $(BUILD)/fp_math_test/Vfp_math_test
-CORE_EXE := $(BUILD)/core/Vbnn_sim_top
-CORE_TEST_EXE := $(BUILD)/core-test/Vbnn_sim_top
+CORE_RTL   := $(FP_PACKAGE) $(filter-out $(FP_PACKAGE),$(wildcard ../bnn_core/*.sv))
+SIM_RTL    := $(sort $(wildcard sim_rtl/*.sv))
 
-.PHONY: all test host-test fp-test dma-test negative-test test-widths core core-test core-smoke run lint lint-core clean help FORCE
-all: test
+.PHONY: all build test gen run check clean help
+.DEFAULT_GOAL := all
 
-$(BUILD):
-	mkdir -p $(BUILD)
+all: build
+build: $(SIM)
 
-# Flags are not normal file prerequisites. Keep a content stamp, and discard only
-# the affected generated build when flags change so stale objects cannot survive.
-FORCE:
+$(SIM): $(SIM_RTL) $(CORE_RTL) simple_test_main.cpp Makefile
+	$(VERILATOR) --cc --exe --build --assert -Wall -j $(JOBS) \
+		--Mdir $(BUILD) --top-module bnn_sim_top \
+		-CFLAGS "-std=c++17" \
+		$(SIM_RTL) $(CORE_RTL) simple_test_main.cpp
 
-$(BUILD)/host_driver_test.config $(BUILD)/dma-$(DMA_WIDTH).config $(BUILD)/fp_math_test.config $(BUILD)/core.config $(BUILD)/core-test.config: FORCE | $(BUILD)
-	@printf '%s\n' '$(VERILATOR)' '$(CXX)' '$(VFLAGS)' '$(VFLAGS_COMB)' '$(CXXFLAGS_SIM)' > $@.tmp
-	@if cmp -s $@.tmp $@; then rm -f $@.tmp; else rm -rf $(basename $@); mv -f $@.tmp $@; fi
+# Build, generate a random case, run it, and verify the output image.
+test: $(SIM)
+	$(PYTHON) tests/gen_random_case.py $(SEED) $(TEST_DIR)
+	$(SIM) $(TEST_DIR)/commands.hex $(TEST_DIR)/memory.img
+	$(PYTHON) tests/check_random_case.py $(SEED) $(TEST_DIR)
 
-$(BUILD)/host_driver_test: host_driver_test.cpp include/host_driver.hpp Makefile $(BUILD)/host_driver_test.config | $(BUILD)
-	$(CXX) -std=c++17 -Wall -Wextra -Werror -Iinclude $< -o $@
+# Run the committed seed-1 case.
+run: $(SIM)
+	$(SIM) $(DATA_DIR)/commands.hex $(DATA_DIR)/memory.img
 
-host-test: $(BUILD)/host_driver_test
-	./$(BUILD)/host_driver_test
+# Regenerate the committed case; SEED defaults to 1.
+gen:
+	$(PYTHON) tests/gen_random_case.py $(SEED) $(DATA_DIR)
 
-$(FP_TEST_EXE): $(FP_PACKAGE) fp_math_test.sv fp_math_test.cpp Makefile $(BUILD)/fp_math_test.config | $(BUILD)
-	$(VERILATOR) $(VFLAGS_COMB) --top-module fp_math_test --Mdir $(BUILD)/fp_math_test \
-		-CFLAGS "$(CXXFLAGS_SIM)" \
-		$(FP_PACKAGE) fp_math_test.sv $(SIM_DIR)/fp_math_test.cpp
-
-fp-test: $(FP_TEST_EXE)
-	./$(FP_TEST_EXE)
-
-$(DMA_EXE): bnn_dma_memory.sv dma_memory_test.cpp virtual_memory.cpp $(HEADERS) Makefile $(BUILD)/dma-$(DMA_WIDTH).config | $(BUILD)
-	$(VERILATOR) $(VFLAGS) --top-module bnn_dma_memory --Mdir $(BUILD)/dma-$(DMA_WIDTH) \
-		-GADDR_WIDTH=64 -GDMA_DATA_WIDTH=$(DMA_WIDTH) \
-		-CFLAGS "$(CXXFLAGS_SIM) -DTEST_DMA_WIDTH=$(DMA_WIDTH)" \
-		bnn_dma_memory.sv $(SIM_DIR)/dma_memory_test.cpp $(SIM_DIR)/virtual_memory.cpp
-
-dma-test: $(DMA_EXE)
-	./$(DMA_EXE) --seed 1
-	./$(DMA_EXE) --seed 7
-	./$(DMA_EXE) --seed 42
-
-negative-test: $(DMA_EXE)
-	$(PYTHON) test_protocol_errors.py ./$(DMA_EXE)
-
-test: host-test fp-test dma-test negative-test core-test core-smoke
-
-test-widths:
-	$(MAKE) dma-test negative-test DMA_WIDTH=64
-	$(MAKE) dma-test negative-test DMA_WIDTH=128
-	$(MAKE) dma-test negative-test DMA_WIDTH=256
-
-# Compile the arithmetic package before the modules that import it.
-$(CORE_EXE): bnn_sim_top.sv bnn_dma_memory.sv main.cpp virtual_memory.cpp $(HEADERS) $(CORE_RTL) Makefile $(BUILD)/core.config | $(BUILD)
-	$(VERILATOR) $(VFLAGS) \
-		--top-module bnn_sim_top --Mdir $(BUILD)/core -CFLAGS "$(CXXFLAGS_SIM)" \
-		bnn_sim_top.sv bnn_dma_memory.sv $(CORE_RTL) $(SIM_DIR)/main.cpp $(SIM_DIR)/virtual_memory.cpp
-
-core: $(CORE_EXE)
-
-$(CORE_TEST_EXE): bnn_sim_top.sv bnn_dma_memory.sv core_test.cpp virtual_memory.cpp $(HEADERS) $(CORE_RTL) Makefile $(BUILD)/core-test.config | $(BUILD)
-	$(VERILATOR) $(VFLAGS) --top-module bnn_sim_top --Mdir $(BUILD)/core-test \
-		-CFLAGS "$(CXXFLAGS_SIM)" bnn_sim_top.sv bnn_dma_memory.sv $(CORE_RTL) \
-		$(SIM_DIR)/core_test.cpp $(SIM_DIR)/virtual_memory.cpp
-
-core-test: $(CORE_TEST_EXE)
-	./$(CORE_TEST_EXE) --seed 1
-	./$(CORE_TEST_EXE) --seed 7
-	./$(CORE_TEST_EXE) --seed 42
-
-core-smoke: core
-	$(PYTHON) test_cli.py ./$(CORE_EXE)
-
-run: core
-	./$(CORE_EXE) $(ARGS)
-
-lint:
-	$(VERILATOR) --lint-only --assert -Wall --top-module bnn_dma_memory bnn_dma_memory.sv
-	$(VERILATOR) --lint-only --assert -Wall --top-module fp_math_test $(FP_PACKAGE) fp_math_test.sv
-
-lint-core:
-	$(VERILATOR) --lint-only --assert -Wall --top-module bnn_core_top $(CORE_RTL)
-	$(VERILATOR) --lint-only -Wall -DSYNTHESIS --top-module bnn_core_top $(CORE_RTL)
-	$(VERILATOR) --lint-only --assert -Wall --top-module bnn_sim_top bnn_sim_top.sv bnn_dma_memory.sv $(CORE_RTL)
+# Verify the last run of the committed case.
+check:
+	$(PYTHON) tests/check_random_case.py $(SEED) $(DATA_DIR)
 
 clean:
 	rm -rf $(BUILD)
+	rm -f $(DATA_DIR)/memory_out.img
 
 help:
-	@printf '%s\n' 'make test         Full host/FP/DMA/negative/core/CLI regression suite' \
-		'make test-widths  Repeat DMA + protocol negative tests at 64/128/256-bit widths' \
-		'make fp-test      Combinational bnn_fp_math arithmetic regression' \
-		'make core         Build the actual bnn_core_top CLI simulator' \
-		'make core-test    End-to-end instruction/DMA/matrix regression' \
-		'make core-smoke   CLI idle, command-file, binary I/O, VCD and error tests' \
-		'make run ARGS="--help"  See core simulator CLI' \
-		'make lint         Strict DMA-model and fp_math_test lint' \
-		'make lint-core    Strict core RTL (sim + SYNTHESIS) and sim-top lint' \
-		'make clean        Remove sim/build only'
+	@printf '%s\n' \
+		'make / make build   Build $(SIM)' \
+		'make test [SEED=N]  Generate, run, and verify a random case' \
+		'make run            Run the committed tests/case case' \
+		'make gen [SEED=N]   Regenerate tests/case data' \
+		'make check [SEED=N] Verify tests/case/memory_out.img' \
+		'make clean          Remove build outputs'

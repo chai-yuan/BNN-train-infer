@@ -8,9 +8,10 @@
 bnn-hw-v2/
 ├── bnn_core/                  # 协议无关的 BNN v2 计算核心 RTL
 │   ├── bnn_fp_math.sv         # 可综合浮点/量化算术包（FP16->FP32、FTZ/RTZ 乘加、除 127、INT8 量化）
-│   ├── bnn_core_top.sv        # 计算核心顶层：组装 6 个子模块、片上 Weight SRAM 与读 DMA MUX
+│   ├── bnn_core_top.sv        # 计算核心顶层：组装 6 个功能子模块、Weight SRAM 与读 DMA MUX
 │   ├── bnn_top_controller.sv  # 64-bit 单阶段原子指令控制器与全局状态机
 │   ├── bnn_weight_loader.sv   # 紧密排列外部权重突发读取、跨拍解包、自动补零写入 Weight SRAM
+│   ├── bnn_weight_sram.sv     # 片上 Weight SRAM（1R1W 同步推断存储，默认 128 x 144-bit）
 │   ├── bnn_input_quant_buffer.sv # 2D 步长输入读取、可选 FP32 行动态量化 / INT8 直通缓冲
 │   ├── bnn_core_array.sv      # 多通道计算阵列（单行激活锁存、按组读取权重、广播提交与同步收集）
 │   ├── bnn_core_unit.sv       # 单通道计算单元（有符号 INT8 二值点积 + FP16 权重缩放 + 可选行反量化）
@@ -32,8 +33,8 @@ bnn-hw-v2/
 
 片上包含两块同步 SRAM，均由控制器在时序上严格保证读写互斥：
 
-- **Weight SRAM（默认 `128 × 144-bit`）**：最多容纳 `MAX_OUT_CHANS = 128` 条权重（分为 `MAX_WEIGHT_GROUPS = 32` 组，每组 `ODMA_FP32_NUM = 4` 通道）。`OP_LOAD_WEIGHT` 仅在 `!array_enable && !array_busy` 时写入；`OP_COMPUTE` 期间仅由阵列读取。
-- **Output Post SRAM（默认 `4096 × 128-bit`）**：最多暂存 `MAX_ROWS × MAX_WEIGHT_GROUPS = 128 × 32` 拍（即 `128 × 128` 个 FP32）分块结果。`OP_COMPUTE` 期间内部读写执行覆盖或跨块累加；`OP_WRITEBACK` 期间仅由 `bnn_output_writer` 顺序读取。
+- **Weight SRAM（默认 `128 × 144-bit`，`bnn_weight_sram.sv`）**：最多容纳 `MAX_OUT_CHANS = 128` 条权重（分为 `MAX_WEIGHT_GROUPS = 32` 组，每组 `ODMA_FP32_NUM = 4` 通道）。`OP_LOAD_WEIGHT` 仅在 `!array_enable && !array_busy` 时写入；`OP_COMPUTE` 期间仅由阵列读取。
+- **Output Post SRAM（默认 `4096 × 128-bit`，`bnn_output_post_sram.sv`）**：最多暂存 `MAX_ROWS × MAX_WEIGHT_GROUPS = 128 × 32` 拍（即 `128 × 128` 个 FP32）分块结果。`OP_COMPUTE` 期间内部读写执行覆盖或跨块累加；`OP_WRITEBACK` 期间仅由 `bnn_output_writer` 顺序读取。
 - **DMA 读通道多路复用 (`dma_rd_mux_sel`)**：由控制器在确认在途读事务与子模块完全排空（`children_idle`）后静态切换给 `bnn_weight_loader`（`0`）或 `bnn_input_quant_buffer`（`1`）。
 
 ### 数据布局与算术契约 (`bnn_fp_math`)

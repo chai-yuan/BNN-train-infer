@@ -5,8 +5,8 @@
 bnn_core_top (BNN v2 计算核心顶层封装)
 ----------------------------------------------------------------------------
 模块职责与边界：
-将核心内部 6 个功能子模块、片上 Weight SRAM 以及内部 DMA 读通道多路选择器组装为完整、
-独立于具体外部总线协议（AXI4 / Wishbone 等）的计算核心顶层。
+将核心内部 6 个功能子模块、独立的 bnn_weight_sram 以及内部 DMA 读通道多路选择器组装为
+完整、独立于具体外部总线协议（AXI4 / Wishbone 等）的计算核心顶层。
 
 对外仅暴露三组极简标准接口：
 1. 宿主机单阶段 64-bit 原子命令与状态接口 (cmd_* / status_busy)
@@ -39,8 +39,9 @@ bnn_core_top (BNN v2 计算核心顶层封装)
                              +--------------------+
 
 内部存储与仲裁约定：
-- Weight SRAM (128 x 144-bit) 封装于本顶层内部。bnn_top_controller 保证 OP_LOAD_WEIGHT
-  写操作（在 !array_enable && !array_busy 下执行）与 OP_COMPUTE 读操作严格互斥。
+- Weight SRAM (128 x 144-bit) 由 bnn_weight_sram 模块实现，实例化于本顶层内部。
+  bnn_top_controller 保证 OP_LOAD_WEIGHT 写操作（在 !array_enable && !array_busy 下执行）
+  与 OP_COMPUTE 读操作严格互斥。
 - DMA 读通道 MUX 由 dma_rd_mux_sel 静态切换（0：bnn_weight_loader；1：bnn_input_quant_buffer），
   未选通一侧的 cmd_ready 与 data_valid 均被门控拉低。
 ============================================================================
@@ -109,7 +110,6 @@ module bnn_core_top #(
     localparam int unsigned OSRAM_DEPTH       = MAX_ROWS * MAX_WEIGHT_GROUPS;
     localparam int unsigned OSRAM_ADDR_WIDTH  = $clog2(OSRAM_DEPTH);
     localparam int unsigned BEAT_COUNT_WIDTH  = $clog2(OSRAM_DEPTH + 1);
-    localparam int unsigned WSRAM_DEPTH       = 1 << WSRAM_ADDR_WIDTH;
 
     // ------------------------------------------------------------------------
     // 控制器 <-> 各子模块控制与状态连线
@@ -186,19 +186,19 @@ module bnn_core_top #(
     wire [WSRAM_ADDR_WIDTH-1:0]      wsram_raddr;
     wire [WEIGHT_WIDTH-1:0]          wsram_rdata;
 
-    logic [WEIGHT_WIDTH-1:0]         wsram_mem  [0:WSRAM_DEPTH-1];
-    logic [WEIGHT_WIDTH-1:0]         wsram_pipe [0:WSRAM_READ_LATENCY-1];
-
-    always_ff @(posedge clock) begin
-        if (wsram_wen)
-            wsram_mem[wsram_waddr] <= wsram_wdata;
-        if (wsram_ren)
-            wsram_pipe[0] <= wsram_mem[wsram_raddr];
-        for (int stage = 1; stage < WSRAM_READ_LATENCY; stage = stage + 1)
-            wsram_pipe[stage] <= wsram_pipe[stage-1];
-    end
-
-    assign wsram_rdata = wsram_pipe[WSRAM_READ_LATENCY-1];
+    bnn_weight_sram #(
+        .WEIGHT_WIDTH (WEIGHT_WIDTH),
+        .ADDR_WIDTH   (WSRAM_ADDR_WIDTH),
+        .READ_LATENCY (WSRAM_READ_LATENCY)
+    ) u_weight_sram (
+        .clock (clock),
+        .wen   (wsram_wen),
+        .waddr (wsram_waddr),
+        .wdata (wsram_wdata),
+        .ren   (wsram_ren),
+        .raddr (wsram_raddr),
+        .rdata (wsram_rdata)
+    );
 
     // ------------------------------------------------------------------------
     // 数据流内部通路连线
@@ -443,7 +443,8 @@ module bnn_core_top #(
         assert (WSRAM_READ_LATENCY >= 1 && OSRAM_READ_LATENCY >= 1)
             else $fatal(1, "SRAM read latencies must be >= 1");
         assert (MAX_WEIGHT_GROUPS > 0 &&
-                (int'(WEIGHT_BASE_ADDR) + MAX_WEIGHT_GROUPS * ODMA_FP32_NUM <= WSRAM_DEPTH))
+                (64'(WEIGHT_BASE_ADDR) + 64'(MAX_WEIGHT_GROUPS) * 64'(ODMA_FP32_NUM) <=
+                 (64'd1 << WSRAM_ADDR_WIDTH)))
             else $fatal(1, "Weight groups exceed Weight SRAM capacity");
     end
 
