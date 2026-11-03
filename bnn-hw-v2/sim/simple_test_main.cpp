@@ -203,7 +203,7 @@ const char* const kArrayStates[] = {
     "IDLE", "READ_REQUEST", "READ_RETURN", "SUBMIT", "WAIT_OUTPUT"
 };
 const char* const kUnitStates[] = {
-    "IDLE", "DOT", "WEIGHT_SCALE", "ROW_SCALE", "OUTPUT_DATA"
+    "IDLE", "DOT", "FP_CONV", "WEIGHT_SCALE", "ROW_SCALE", "OUTPUT_DATA"
 };
 const char* const kPostStates[] = {
     "IDLE", "RECEIVE", "WRITE_BACK"
@@ -713,6 +713,8 @@ public:
         if (arr == 1 && prev_arr != 1 && (prev_arr == 0 || prev_arr == 4) &&
             active_compute_.active)
             start_group(cycle);
+        if (arr == 3 && prev_arr == 4 && active_compute_.active)
+            start_group(cycle);
 
         if (*signals_.wl_done != 0)
             finalize_weight_load(cycle);
@@ -749,13 +751,13 @@ public:
         if (active_row_.active) {
             if (arr < 5)
                 ++active_row_.array_states[arr];
-            if (modules_[4].current >= 0 && modules_[4].current < 5)
+            if (modules_[4].current >= 0 && modules_[4].current < 6)
                 ++active_row_.unit_states[modules_[4].current];
         }
         if (active_group_.active) {
             if (arr < 5)
                 ++active_group_.array_states[arr];
-            if (modules_[4].current >= 0 && modules_[4].current < 5)
+            if (modules_[4].current >= 0 && modules_[4].current < 6)
                 ++active_group_.unit_states[modules_[4].current];
         }
         if (active_write_row_.active && wr < 7)
@@ -986,7 +988,7 @@ private:
                 "u_core_array/g_unit[" + std::to_string(i) + "]";
             modules_[4 + i] = ModuleTrack{
                 unit_name, "u_core_array;g_unit[" + std::to_string(i) + "]",
-                5 + i, kUnitStates, 5, signals_.unit_state[i]};
+                5 + i, kUnitStates, 6, signals_.unit_state[i]};
         }
         modules_[8] = ModuleTrack{"u_output_post_sram", "u_output_post_sram", 9,
                                   kPostStates, 3, signals_.post_state};
@@ -1255,7 +1257,7 @@ private:
                << "] array["
                << format_states(kArrayStates, 5, active_row_.array_states)
                << "] unit["
-               << format_states(kUnitStates, 5, active_row_.unit_states)
+               << format_states(kUnitStates, 6, active_row_.unit_states)
                << "] iqbuf_wait_array=" << active_row_.iqbuf_wait_array
                << " array_starved=" << active_row_.array_starved
                << " odma_wait=" << active_row_.odma_wait;
@@ -1299,7 +1301,7 @@ private:
         detail << "channels=" << active_group_.channels << " array["
                << format_states(kArrayStates, 5, active_group_.array_states)
                << "] unit["
-               << format_states(kUnitStates, 5, active_group_.unit_states)
+               << format_states(kUnitStates, 6, active_group_.unit_states)
                << "] odma_wait=" << active_group_.odma_wait;
         tx.detail = detail.str();
         std::ostringstream args;
