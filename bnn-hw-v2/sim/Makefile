@@ -1,19 +1,20 @@
-# Minimal Verilator test flow for the BNN v2 simulation top.
+# Verilator + DPI-C regression flow for the BNN v2 simulation top.
 VERILATOR ?= verilator
 PYTHON    ?= python3
 JOBS      ?= 2
-SEED      ?= 1
+MODEL     ?= ../../qwen3-zh-5k.gguf
 
 BUILD     := build
 DATA_DIR  := tests/case
-TEST_DIR  := $(BUILD)/testdata
 SIM       := $(BUILD)/Vbnn_sim_top
+PROFILE   := --trace $(BUILD)/case_trace.json --folded $(BUILD)/case_flame.folded \
+             --report $(DATA_DIR)/memory_profile.txt
 
 FP_PACKAGE := ../bnn_core/bnn_fp_math.sv
 CORE_RTL   := $(FP_PACKAGE) $(filter-out $(FP_PACKAGE),$(wildcard ../bnn_core/*.sv))
 SIM_RTL    := $(sort $(wildcard sim_rtl/*.sv))
 
-.PHONY: all build test gen run check clean help
+.PHONY: all build test run gen check clean help
 .DEFAULT_GOAL := all
 
 all: build
@@ -25,33 +26,33 @@ $(SIM): $(SIM_RTL) $(CORE_RTL) simple_test_main.cpp Makefile
 		-CFLAGS "-std=c++17" \
 		$(SIM_RTL) $(CORE_RTL) simple_test_main.cpp
 
-# Build, generate a random case, run it, and verify the output image.
+# Run the committed Qwen3 W1A8 case and verify it within the recorded tolerance.
 test: $(SIM)
-	$(PYTHON) tests/gen_random_case.py $(SEED) $(TEST_DIR)
-	$(SIM) $(TEST_DIR)/commands.hex $(TEST_DIR)/memory.img
-	$(PYTHON) tests/check_random_case.py $(SEED) $(TEST_DIR)
+	$(SIM) $(DATA_DIR)/commands.hex $(DATA_DIR)/memory.img $(PROFILE)
+	$(PYTHON) tests/check_model_case.py $(DATA_DIR)
 
-# Run the committed seed-1 case.
+# Run the committed case without checking.
 run: $(SIM)
-	$(SIM) $(DATA_DIR)/commands.hex $(DATA_DIR)/memory.img
+	$(SIM) $(DATA_DIR)/commands.hex $(DATA_DIR)/memory.img $(PROFILE)
 
-# Regenerate the committed case; SEED defaults to 1.
+# Regenerate tests/case from the Qwen3 GGUF (requires numpy and the model).
 gen:
-	$(PYTHON) tests/gen_random_case.py $(SEED) $(DATA_DIR)
+	$(PYTHON) tests/gen_model_case.py --model $(MODEL) --out $(DATA_DIR)
 
 # Verify the last run of the committed case.
 check:
-	$(PYTHON) tests/check_random_case.py $(SEED) $(DATA_DIR)
+	$(PYTHON) tests/check_model_case.py $(DATA_DIR)
 
 clean:
 	rm -rf $(BUILD)
-	rm -f $(DATA_DIR)/memory_out.img
+	rm -f $(DATA_DIR)/memory_out.img $(DATA_DIR)/memory_profile.txt \
+		$(DATA_DIR)/memory_trace.json $(DATA_DIR)/memory_flame.folded
 
 help:
 	@printf '%s\n' \
 		'make / make build   Build $(SIM)' \
-		'make test [SEED=N]  Generate, run, and verify a random case' \
+		'make test           Run the committed case and verify with golden tolerance' \
 		'make run            Run the committed tests/case case' \
-		'make gen [SEED=N]   Regenerate tests/case data' \
-		'make check [SEED=N] Verify tests/case/memory_out.img' \
-		'make clean          Remove build outputs'
+		'make gen [MODEL=K]  Regenerate tests/case from a Qwen3-zh-5k GGUF' \
+		'make check          Verify tests/case/memory_out.img from the last run' \
+		'make clean          Remove build outputs and generated profiles'

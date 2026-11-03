@@ -94,20 +94,28 @@ bnn-hw-v2/
 
 ## 仿真验证
 
-所有单元测试、协议负测、算术包回归、核心端到端矩阵回归与 CLI 集成测试统一收敛在 [`sim/`](sim/README.md)：
+[`sim/`](sim/README.md) 当前提供固定 Qwen3 W1A8 回归用例：取自 Qwen3-zh-5k 第 0 层
+`blk.0.attn_q.weight`（K=512、N=512、G=128），M=16，包含
+
+- `full_i8`：`BNN_OP_GEMM`，K=512，跨 4 个 K 块累加；
+- `tile_i8`：`BNN_OP_GEMM`，K=128；
+- `tile_f32`：`BNN_OP_GEMM_F32`，K=128，FP32 输入为 INT8 值的精确 `2^-6` 缩放。
+
+`commands.hex` 与 `memory.img` 可直接输入 `simple_test_main.cpp`；`golden_*.hex` 按
+bnn-accelerator v2 语义生成，并与 soft 后端逐位交叉验证。校验容差为
+`atol=1e-5, rtol=1e-6`，当前 RTL 实测最大相对误差 `1.45e-7`；`baseline_cycles.txt`
+记录当前基线总周期，供后续性能对比。
 
 ```sh
-# 运行静态检查（含仿真断言模式与 -DSYNTHESIS 综合模式）
-make -C bnn-hw-v2/sim lint lint-core
-
-# 运行全套回归（host-test + fp-test + dma-test + negative-test + core-test + core-smoke）
-make -C bnn-hw-v2/sim test
-
-# 额外验证 DMA 仿真模型的 64/128/256-bit 位宽参数化
-make -C bnn-hw-v2/sim test-widths
+make -C bnn-hw-v2/sim test    # 构建、运行并校验固定用例
+make -C bnn-hw-v2/sim run     # 只运行
+make -C bnn-hw-v2/sim check   # 校验上一次运行结果
+make -C bnn-hw-v2/sim gen     # 从 Qwen3-zh-5k GGUF 重新生成用例（需要 numpy）
 ```
 
-详细 CLI 用法、C++ `HostDriver` / `VirtualMemory` 接口与 DMA 协议约定见 [`sim/README.md`](sim/README.md)。
+详细说明见 [`sim/README.md`](sim/README.md)。注意 v2 RTL 按每个 128 特征 COMPUTE tile
+独立量化，K>128 的 FP32 任务不符合 bnn-accelerator 的完整逻辑行量化语义，因此 FP32
+负载固定为 K=128。
 
 ## 备忘录
 

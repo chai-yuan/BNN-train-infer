@@ -1,0 +1,69 @@
+{
+  "description": "Qwen3-zh-5k blk.0.attn_q W1A8 GEMM regression case",
+  "model": "qwen3-zh-5k.gguf",
+  "matrix": {
+    "in_features": 512,
+    "out_features": 512,
+    "group_size": 128
+  },
+  "rows": 16,
+  "f32_tile_scale": 0.015625,
+  "addresses": {
+    "weights": 4096,
+    "int8_full_input": 65536,
+    "int8_tile_input": 73728,
+    "int8_full_output": 131072,
+    "int8_tile_output": 196608,
+    "f32_tile_input": 262144,
+    "f32_tile_output": 327680
+  },
+  "workloads": [
+    {
+      "name": "full_i8",
+      "operation": "BNN_OP_GEMM",
+      "input_type": "i8",
+      "in_features": 512,
+      "input": "int8_full_input",
+      "output": "int8_full_output",
+      "golden": "golden_full_i8.hex"
+    },
+    {
+      "name": "tile_i8",
+      "operation": "BNN_OP_GEMM",
+      "input_type": "i8",
+      "in_features": 128,
+      "input": "int8_tile_input",
+      "output": "int8_tile_output",
+      "golden": "golden_tile_i8.hex"
+    },
+    {
+      "name": "tile_f32",
+      "operation": "BNN_OP_GEMM_F32",
+      "input_type": "f32",
+      "in_features": 128,
+      "input": "f32_tile_input",
+      "output": "f32_tile_output",
+      "golden": "golden_tile_f32.hex"
+    }
+  ],
+  "relationships": [
+    {
+      "left": "tile_f32",
+      "right": "tile_i8",
+      "scale": 0.015625,
+      "description": "FP32 tile equals the exact power-of-two scaling of the INT8 tile"
+    }
+  ],
+  "tolerance": {
+    "atol": 1e-05,
+    "rtol": 1e-06
+  },
+  "notes": [
+    "Activation source: tokens 0..15 embeddings plus blk.0 RMSNorm, quantized per row.",
+    "tile_i8 and tile_f32 use the first 128 input features of the same layer matrix.",
+    "FP32 tile input is INT8 * 2^-6 so both hardware and API quantization recover the same Q.",
+    "v2 RTL quantizes each 128-feature COMPUTE tile independently; FP32 is kept at K=128 to preserve BNN_OP_GEMM_F32 full-logical-row quantization semantics.",
+    "Goldens follow bnn-accelerator v2 and were cross-checked against the soft backend.",
+    "baseline_cycles.txt is the performance reference and is not rewritten by this script."
+  ]
+}
