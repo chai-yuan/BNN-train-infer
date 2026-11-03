@@ -11,11 +11,12 @@ bnn-hw-v2/
 │   ├── bnn_core_top.sv        # 计算核心顶层：组装 6 个功能子模块、Weight SRAM 与读 DMA MUX
 │   ├── bnn_top_controller.sv  # 64-bit 单阶段原子指令控制器与全局状态机
 │   ├── bnn_weight_loader.sv   # 紧密排列外部权重突发读取、跨拍解包、自动补零写入 Weight SRAM
-│   ├── bnn_weight_sram.sv     # 片上 Weight SRAM（1R1W 同步推断存储，默认 128 x 144-bit）
+│   ├── sram_weight_wrapper.sv # Weight SRAM 浅包装（单端口 1RW SRAM 宏，默认 128 x 144-bit）
 │   ├── bnn_input_quant_buffer.sv # 2D 步长输入读取、可选 FP32 行动态量化 / INT8 直通缓冲
 │   ├── bnn_core_array.sv      # 多通道计算阵列（单行激活锁存、按组读取权重、广播提交与同步收集）
 │   ├── bnn_core_unit.sv       # 单通道计算单元（有符号 INT8 二值点积 + FP16 权重缩放 + 可选行反量化）
-│   ├── bnn_output_post_sram.sv# 片上 Output SRAM（4096x128b SDP）与跨 K 块 FP32 覆盖/累加后处理
+│   ├── sram_result_wrapper.sv # Result SRAM 浅包装（带字节写掩码的单端口 1RW SRAM 宏，默认 4096 x 128-bit）
+│   ├── bnn_output_accum.sv    # 结果 SRAM 访问层：跨 K 块 FP32 覆盖/累加后处理与 session 握手
 │   └── bnn_output_writer.sv   # Output SRAM -> 外部内存 2D 步长突发写回与尾列字节掩码生成
 ├── sim/                       # Verilator + DPI-C 仿真层、CLI 运行器与全套回归测试
 └── bnn_top.sv                 # 外层 AXI4 + 128-bit 指令接口顶层封装骨架（尚未接入内部引擎）
@@ -31,10 +32,10 @@ bnn-hw-v2/
 2. **统一外部内存突发读接口**：`mem_rd_cmd_*` 与 `mem_rd_data_*`（默认 128-bit 数据，长度 `len` 为实际拍数）。
 3. **统一外部内存突发写接口**：`mem_wr_cmd_*`、`mem_wr_data_*`（含 16-bit 字节掩码 `strb`）与 `mem_wr_done`。
 
-片上包含两块同步 SRAM，均由控制器在时序上严格保证读写互斥：
+片上包含两块同步 SRAM。两块存储体都是对 FPGA Block RAM / ASIC 常见**单端口 1RW**（`en / we / addr / wdata / rdata`，同一拍只能读或写）SRAM 宏的**浅包装**：内部只有存储阵列与同步读输出流水，不含控制状态机、不复位清零、不做读写仲裁；文件内以 `VENDOR_SRAM_MACRO_BEGIN/END` 标出可直接替换为厂商宏（RAMB36E1 / altsyncram / ASIC SRAM 编译器输出）的行为模型。
 
-- **Weight SRAM（默认 `128 × 144-bit`，`bnn_weight_sram.sv`）**：最多容纳 `MAX_OUT_CHANS = 128` 条权重（分为 `MAX_WEIGHT_GROUPS = 32` 组，每组 `ODMA_FP32_NUM = 4` 通道）。`OP_LOAD_WEIGHT` 仅在 `!array_enable && !array_busy` 时写入；`OP_COMPUTE` 期间仅由阵列读取。
-- **Output Post SRAM（默认 `4096 × 128-bit`，`bnn_output_post_sram.sv`）**：最多暂存 `MAX_ROWS × MAX_WEIGHT_GROUPS = 128 × 32` 拍（即 `128 × 128` 个 FP32）分块结果。`OP_COMPUTE` 期间内部读写执行覆盖或跨块累加；`OP_WRITEBACK` 期间仅由 `bnn_output_writer` 顺序读取。
+- **Weight SRAM（`sram_weight_wrapper.sv`，默认 `128 × 144-bit`，`READ_LATENCY = 1`）**：最多容纳 `MAX_OUT_CHANS = 128` 条权重（分为 `MAX_WEIGHT_GROUPS = 32` 组，每组 `ODMA_FP32_NUM = 4` 通道）。`OP_LOAD_WEIGHT`（写）与 `OP_COMPUTE`（读）由控制器时分互斥，`bnn_core_top` 用 `en/we/addr` MUX 合流到唯一端口，无仲裁等待、无吞吐损失。
+- **Result SRAM（`sram_result_wrapper.sv`，默认 `4096 × 128-bit`，带字节写掩码 `wstrb`）**：最多暂存 `MAX_ROWS × MAX_WEIGHT_GROUPS = 128 × 32` 拍（即 `128 × 128` 个 FP32）分块结果。存储体本身不含逻辑，覆盖/跨块累加与 session 握手由访问层 `bnn_output_accum.sv` 实现并在其中完成单端口合流：累加时 `RECEIVE` 拍发起读、`WRITE_BACK` 拍写回（天然错拍），`OP_WRITEBACK` 期间端口让给 `bnn_output_writer` 顺序读取。
 - **DMA 读通道多路复用 (`dma_rd_mux_sel`)**：由控制器在确认在途读事务与子模块完全排空（`children_idle`）后静态切换给 `bnn_weight_loader`（`0`）或 `bnn_input_quant_buffer`（`1`）。
 
 ### 数据布局与算术契约 (`bnn_fp_math`)

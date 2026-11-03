@@ -42,7 +42,7 @@ WRITEBACK 要求已有完整结果；accum 要求旧结果与本次 M/N 完全�
    - 执行动作：
      a) 锁存 M，结合当前已配置的 G 计算 opost_total_beats = M * G；
      b) 切换 dma_rd_mux_sel = 1，拉高 array_enable = 1；
-     c) 同时启动 bnn_output_post_sram 与 bnn_input_quant_buffer；
+     c) 同时启动 bnn_output_accum（结果 SRAM 访问层）与 bnn_input_quant_buffer；
      d) 等待 opost_session_done 后拉低 array_enable = 0，并等待 !array_busy 确保在途读排空。
 
 5. OP_WRITEBACK      (opcode = 8'h30) —— 将暂存 SRAM 分块结果写回外部内存
@@ -118,7 +118,7 @@ module bnn_top_controller #(
     output wire [STRIDE_WIDTH-1:0]          iqbuf_row_stride,
     output wire [ROW_COUNT_WIDTH-1:0]       iqbuf_row_num_m,
 
-    // 4. 去往 bnn_output_post_sram
+    // 4. 去往 bnn_output_accum（结果 SRAM 访问层）
     output wire                             opost_session_start,
     input  wire                             opost_session_busy,
     input  wire                             opost_session_done,

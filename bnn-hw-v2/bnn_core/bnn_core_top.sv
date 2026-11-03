@@ -5,8 +5,8 @@
 bnn_core_top (BNN v2 计算核心顶层封装)
 ----------------------------------------------------------------------------
 模块职责与边界：
-将核心内部 6 个功能子模块、独立的 bnn_weight_sram 以及内部 DMA 读通道多路选择器组装为
-完整、独立于具体外部总线协议（AXI4 / Wishbone 等）的计算核心顶层。
+将核心内部 6 个功能子模块、sram_weight_wrapper（Weight SRAM 浅包装）以及内部 DMA 读通道
+多路选择器组装为完整、独立于具体外部总线协议（AXI4 / Wishbone 等）的计算核心顶层。
 
 对外仅暴露三组极简标准接口：
 1. 宿主机单阶段 64-bit 原子命令与状态接口 (cmd_* / status_busy)
@@ -34,13 +34,22 @@ bnn_core_top (BNN v2 计算核心顶层封装)
               sram_rdata               | odma_data (4xFP32)    |            |
                                        v                       |            |
                              +--------------------+            |            |
-                             |bnn_output_post_sram|<-----------+            |
-                             |  (4096x128b SDP)   |-------------------------+
+                             |  bnn_output_accum  |<-----------+            |
+                             |  + sram_result_    |-------------------------+
+                             |    wrapper (SRAM)  |
                              +--------------------+
 
 内部存储与仲裁约定：
-- Weight SRAM (128 x 144-bit) 由 bnn_weight_sram 模块实现，实例化于本顶层内部。
-  bnn_top_controller 保证 OP_LOAD_WEIGHT 写操作（在 !array_enable && !array_busy 下执行）
+- 两块 SRAM 存储体均为对 FPGA BRAM / ASIC **单端口 1RW**（en / we / addr /
+  wdata / rdata，同一拍只能读或写）SRAM 宏的浅包装：sram_weight_wrapper
+  （128 x 144-bit，本文件直接实例化）与 sram_result_wrapper（4096 x 128-bit，
+  由 bnn_output_accum 内部实例化）。两者只含存储阵列与同步读流水，不含控制逻辑、
+  不复位清零。
+- 单端口读写合流：Weight SRAM 的写（bnn_weight_loader）与读（bnn_core_array）
+  由控制器时分互斥，本文件用 en/we/addr MUX 合并为一路；Result SRAM 的合流在
+  bnn_output_accum 内完成（累加为先读后写，写回读与累加写互斥）。两处均无仲裁
+  等待，故换成单端口 SRAM 不引入额外停顿。
+- bnn_top_controller 保证 OP_LOAD_WEIGHT 写操作（在 !array_enable && !array_busy 下执行）
   与 OP_COMPUTE 读操作严格互斥。
 - DMA 读通道 MUX 由 dma_rd_mux_sel 静态切换（0：bnn_weight_loader；1：bnn_input_quant_buffer），
   未选通一侧的 cmd_ready 与 data_valid 均被门控拉低。
@@ -177,7 +186,9 @@ module bnn_core_top #(
     assign mem_rd_data_ready     = dma_rd_mux_sel ? iqbuf_rd_data_ready : wloader_rd_data_ready;
 
     // ------------------------------------------------------------------------
-    // 片上 Weight SRAM (1R1W, 读写由控制器保证时分互斥)
+    // 片上 Weight SRAM (单端口 1RW 存储宏浅包装)
+    // 单端口合流：写口来自 bnn_weight_loader(OP_LOAD_WEIGHT)，读口来自
+    // bnn_core_array(OP_COMPUTE)，控制器保证二者时分互斥，故无需仲裁、无性能损失。
     // ------------------------------------------------------------------------
     wire                             wsram_wen;
     wire [WSRAM_ADDR_WIDTH-1:0]      wsram_waddr;
@@ -186,17 +197,21 @@ module bnn_core_top #(
     wire [WSRAM_ADDR_WIDTH-1:0]      wsram_raddr;
     wire [WEIGHT_WIDTH-1:0]          wsram_rdata;
 
-    bnn_weight_sram #(
-        .WEIGHT_WIDTH (WEIGHT_WIDTH),
+    wire                             wsram_en   = wsram_wen || wsram_ren;
+    wire                             wsram_we   = wsram_wen;
+    wire [WSRAM_ADDR_WIDTH-1:0]      wsram_addr = wsram_wen ? wsram_waddr : wsram_raddr;
+
+    sram_weight_wrapper #(
+        .DATA_WIDTH   (WEIGHT_WIDTH),
+        .DEPTH        (1 << WSRAM_ADDR_WIDTH),
         .ADDR_WIDTH   (WSRAM_ADDR_WIDTH),
         .READ_LATENCY (WSRAM_READ_LATENCY)
     ) u_weight_sram (
         .clock (clock),
-        .wen   (wsram_wen),
-        .waddr (wsram_waddr),
+        .en    (wsram_en),
+        .we    (wsram_we),
+        .addr  (wsram_addr),
         .wdata (wsram_wdata),
-        .ren   (wsram_ren),
-        .raddr (wsram_raddr),
         .rdata (wsram_rdata)
     );
 
@@ -369,7 +384,7 @@ module bnn_core_top #(
         .odma_ready        (odma_ready)
     );
 
-    bnn_output_post_sram #(
+    bnn_output_accum #(
         .ODMA_FP32_NUM      (ODMA_FP32_NUM),
         .MAX_ROWS           (MAX_ROWS),
         .MAX_WEIGHT_GROUPS  (MAX_WEIGHT_GROUPS),
@@ -377,7 +392,7 @@ module bnn_core_top #(
         .OSRAM_ADDR_WIDTH   (OSRAM_ADDR_WIDTH),
         .BEAT_COUNT_WIDTH   (BEAT_COUNT_WIDTH),
         .OSRAM_READ_LATENCY (OSRAM_READ_LATENCY)
-    ) u_output_post_sram (
+    ) u_output_accum (
         .clock            (clock),
         .reset            (reset),
         .session_start    (opost_session_start),

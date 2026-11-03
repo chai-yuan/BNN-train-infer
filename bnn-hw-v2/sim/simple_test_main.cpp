@@ -206,7 +206,7 @@ const char* const kUnitStates[] = {
     "IDLE", "DOT", "FP_CONV", "WEIGHT_SCALE", "ROW_SCALE", "OUTPUT_DATA"
 };
 const char* const kPostStates[] = {
-    "IDLE", "RECEIVE", "WRITE_BACK"
+    "IDLE", "RECEIVE", "SETTLE", "WRITE_BACK"
 };
 const char* const kWriterStates[] = {
     "IDLE", "COMMAND", "READ_REQUEST", "READ_RETURN", "SEND_DATA",
@@ -941,11 +941,11 @@ private:
         signals_.unit_state[3] = U(3);
 #undef U
 
-        signals_.post_state = P(u_core__DOT__u_output_post_sram__DOT__state);
-        signals_.post_done = P(u_core__DOT__u_output_post_sram__DOT__done_reg);
-        signals_.post_accum = P(u_core__DOT__u_output_post_sram__DOT__accum_reg);
+        signals_.post_state = P(u_core__DOT__u_output_accum__DOT__state);
+        signals_.post_done = P(u_core__DOT__u_output_accum__DOT__done_reg);
+        signals_.post_accum = P(u_core__DOT__u_output_accum__DOT__accum_reg);
         signals_.post_remaining =
-            P(u_core__DOT__u_output_post_sram__DOT__remaining_reg);
+            P(u_core__DOT__u_output_accum__DOT__remaining_reg);
 
         signals_.wr_state = P(u_core__DOT__u_output_writer__DOT__state);
         signals_.wr_done = P(u_core__DOT__u_output_writer__DOT__done_reg);
@@ -990,8 +990,8 @@ private:
                 unit_name, "u_core_array;g_unit[" + std::to_string(i) + "]",
                 5 + i, kUnitStates, 6, signals_.unit_state[i]};
         }
-        modules_[8] = ModuleTrack{"u_output_post_sram", "u_output_post_sram", 9,
-                                  kPostStates, 3, signals_.post_state};
+        modules_[8] = ModuleTrack{"u_output_accum", "u_output_accum", 9,
+                                  kPostStates, 4, signals_.post_state};
         modules_[9] = ModuleTrack{"u_output_writer", "u_output_writer", 10,
                                   kWriterStates, 7, signals_.wr_state};
     }
@@ -1572,7 +1572,7 @@ private:
 
         out << "\nModule busy time (busy = state != IDLE; phases overlap)\n";
         out << "Note: busy includes waiting for the other side.  For example,\n";
-        out << "      u_output_post_sram RECEIVE can be waiting for odma_valid.\n";
+        out << "      u_output_accum RECEIVE can be waiting for odma_valid.\n";
         out << "      Use the stall attribution below to tell work from waiting.\n";
         out << "--------------------------------------------------------\n";
         out << std::left << std::setw(24) << "module" << std::right
