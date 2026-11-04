@@ -1,2 +1,2 @@
 # Total simulation cycles for the committed RTL and case.
-1793055
+106047

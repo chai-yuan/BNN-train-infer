@@ -1,8 +1,9 @@
 # =============================================================================
 # BNN v2 inference build
 #
-# Only the C software reference backend is supported:
-#   make ACCE=soft       (default)
+# Two accelerator backends are supported:
+#   make ACCE=soft       C reference backend (default)
+#   make ACCE=remote     bnn-hw-v2/remote_sim TCP co-simulation backend
 # RTL self-tests are optional and built independently in bnn-hw/bnn_core_test.
 #
 # Only bnn-sw-v2 + bnn-accelerator are built. The legacy bnn-sw / bnn-infer
@@ -12,8 +13,14 @@
 
 ACCE ?= soft
 
-ifneq ($(ACCE),soft)
-$(error Unsupported ACCE '$(ACCE)'; only ACCE=soft is supported)
+ifeq ($(ACCE),soft)
+BUILD_DIR := build/soft
+ACCEL_SOURCE := bnn-accelerator/soft-bnn-accelerator.c
+else ifeq ($(ACCE),remote)
+BUILD_DIR := build/remote
+ACCEL_SOURCE := bnn-accelerator/remote-bnn-accelerator.c
+else
+$(error Unsupported ACCE '$(ACCE)'; use ACCE=soft or ACCE=remote)
 endif
 
 .DEFAULT_GOAL := all
@@ -38,12 +45,11 @@ LINK_FLAGS := $(filter-out -std=c11,$(CFLAGS))
 # Common source and object layout
 # =============================================================================
 
-BUILD_DIR := build/soft
+BUILD_DIR ?= build/soft
 
 ENGINE_SOURCES := bnn-sw-v2/common.c bnn-sw-v2/engine.c bnn-sw-v2/linear.c \
                   bnn-sw-v2/gguf.c bnn-sw-v2/tokenizer/tokenizer-bpe.c bnn-sw-v2/registry.c \
                   bnn-sw-v2/bnn-mlp/bnn-mlp.c bnn-sw-v2/qwen3/qwen3.c
-ACCEL_SOURCE := bnn-accelerator/soft-bnn-accelerator.c
 
 ENGINE_OBJECTS := $(addprefix $(BUILD_DIR)/,$(ENGINE_SOURCES:.c=.o) $(ACCEL_SOURCE:.c=.o))
 MAIN_OBJECT := $(BUILD_DIR)/bnn-infer-v2.o

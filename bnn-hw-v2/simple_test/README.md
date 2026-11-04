@@ -1,7 +1,8 @@
 # BNN v2 仿真与固定回归用例
 
-本目录用 Verilator + DPI-C 驱动 `bnn_core/`：`simple_test_main.cpp` 从两个文件读入
-命令流和初始内存镜像，仿真结束后写出 `memory_out.img`，并生成周期级 profile。
+本目录用 Verilator + DPI-C 驱动 `bnn_core/`，仿真硬件顶层位于
+[`../bnn_sim_top/`](../bnn_sim_top/)：`simple_test_main.cpp` 从两个文件读入命令流和
+初始内存镜像，仿真结束后写出 `memory_out.img`，并生成周期级 profile。
 
 ```sh
 make            # 构建 build/Vbnn_sim_top
@@ -56,6 +57,6 @@ atol = 1e-5, rtol = 1e-6
 当前 RTL 的 FP32 路径采用 FTZ + RTZ，而 golden 采用 RNE；实测最大相对误差
 `1.45e-7`（`full_i8`，2 ulp），`tile_i8` / `tile_f32` 逐位一致。
 
-`baseline_cycles.txt` 记录当前 RTL 的基线总周期（1793055）。`make test`
+`baseline_cycles.txt` 记录当前 RTL 的基线总周期（106047）。`make test`
 会打印本次周期数与相对基线的变化，便于后续性能分析；周期变化不会导致失败；`make gen`
 不会覆盖该文件。

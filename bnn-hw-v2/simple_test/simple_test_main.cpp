@@ -194,7 +194,7 @@ const char* const kControllerStates[] = {
     "COMPUTE_START", "COMPUTE_WAIT", "COMPUTE_DRAIN", "WRITE_START", "WRITE_WAIT"
 };
 const char* const kWeightLoaderStates[] = {
-    "IDLE", "COMMAND", "RECEIVE", "UNPACK", "WRITE_WEIGHT", "WRITE_PADDING"
+    "IDLE", "COMMAND", "STREAM", "WRITE_PADDING"
 };
 const char* const kIqbufStates[] = {
     "IDLE", "COMMAND", "RECEIVE", "SCAN", "SCALE", "QUANTIZE", "OUTPUT_ROW"
@@ -744,7 +744,7 @@ public:
             }
         }
 
-        if (active_weight_load_.active && wl < 6)
+        if (active_weight_load_.active && wl < 4)
             ++active_weight_load_.states[wl];
         if (row_prep_active_ && iq < 7)
             ++row_prep_iq_states_[iq];
@@ -978,7 +978,7 @@ private:
         modules_[0] = ModuleTrack{"u_top_controller", "u_top_controller", 1,
                                   kControllerStates, 10, signals_.ctrl_state};
         modules_[1] = ModuleTrack{"u_weight_loader", "u_weight_loader", 2,
-                                  kWeightLoaderStates, 6, signals_.wl_state};
+                                  kWeightLoaderStates, 4, signals_.wl_state};
         modules_[2] = ModuleTrack{"u_input_quant_buffer", "u_input_quant_buffer", 3,
                                   kIqbufStates, 7, signals_.iq_state};
         modules_[3] = ModuleTrack{"u_core_array", "u_core_array", 4,
@@ -1069,7 +1069,7 @@ private:
         detail << "N=" << active_weight_load_.n
                << " beats=" << active_weight_load_.beats
                << " wloader["
-               << format_states(kWeightLoaderStates, 6,
+               << format_states(kWeightLoaderStates, 4,
                                 active_weight_load_.states)
                << "] dma_stall=" << active_weight_load_.dma_stall
                << " dma_starve=" << active_weight_load_.dma_starve;
@@ -1747,6 +1747,14 @@ extern "C" unsigned long long data_read(unsigned long long address) {
     return value;
 }
 
+// The file-driven testbench reads words directly from g_memory; the DMA burst
+// prefetch hook only exists for network-backed testbenches.
+extern "C" void data_read_burst(unsigned long long address,
+                                unsigned long long bytes) {
+    (void)address;
+    (void)bytes;
+}
+
 extern "C" void data_write(unsigned long long address, unsigned long long data,
                            unsigned char strobe) {
     if ((address & 7ull) != 0)
@@ -1863,6 +1871,7 @@ int main(int argc, char** argv) {
 
         dut.clock = 0;
         dut.reset = 1;
+        dut.finish = 0;
         for (int i = 0; i < 4; ++i)
             tick(dut);
         dut.reset = 0;
@@ -1876,7 +1885,10 @@ int main(int argc, char** argv) {
 
         std::uint64_t cycles = 0;
         while (!context.gotFinish() && cycles < kCycleLimit) {
+            dut.finish = g_command_cursor >= g_commands.size() ? 1 : 0;
             tick_profiled(dut, context, profiler.get(), cycles);
+            if (dut.cmd_error_out)
+                throw std::runtime_error("core reported cmd_error");
             ++cycles;
         }
         if (!context.gotFinish())

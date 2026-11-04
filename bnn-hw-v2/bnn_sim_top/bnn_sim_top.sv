@@ -4,19 +4,31 @@
 ============================================================================
 bnn_sim_top (BNN v2 最小 Verilator 仿真顶层)
 ----------------------------------------------------------------------------
-对外只有 clock/reset。命令流和数据访问全部由仿真存储模块通过 DPI-C
-自动完成：
+对外只有 clock/reset/finish 和少量状态输出。命令流和数据访问全部由仿真存储
+模块通过 DPI-C 自动完成：
 
   bnn_sim_cmd_stream  -- cmd_check()/cmd_get() --> 线性命令流
   bnn_sim_data_memory -- data_read()/data_write() --> 统一数据存储器
 
-所有命令提交完成且核心/DMA 空闲后自动 $finish；核心返回 cmd_error 时
-直接 $fatal。具体 DPI-C 存储模型由 C++ 侧实现。
+finish 由 testbench 在确认不会再有新指令时拉高；此前即使命令队列为空也不会
+结束，便于交互式/网络化仿真。finish 有效且核心/DMA 空闲后自动 $finish。
+
+状态输出供 testbench 观测：busy_out 为核心/DMA 忙，cmd_done_out/cmd_error_out
+为单拍指令完成/错误脉冲，error_out 为命令流锁存的错误状态（核心拒绝指令后
+保持高电平并停止取指，由 testbench 决定如何终止）。具体 DPI-C 存储模型由
+C++ 侧实现。
 ============================================================================
 */
 module bnn_sim_top (
     input  wire clock,
-    input  wire reset
+    input  wire reset,
+    input  wire finish,
+
+    output wire busy_out,
+    output wire command_active,
+    output wire cmd_done_out,
+    output wire cmd_error_out,
+    output wire error_out
 );
     localparam int unsigned DMA_DATA_WIDTH = 128;
     localparam int unsigned DMA_LEN_WIDTH  = 16;
@@ -56,17 +68,24 @@ module bnn_sim_top (
 
     assign busy = status_busy || rd_busy || wr_busy;
 
+    assign busy_out      = busy;
+    assign cmd_done_out  = cmd_done;
+    assign cmd_error_out = cmd_error;
+    assign error_out     = error;
+
     bnn_sim_cmd_stream u_cmd_stream (
-        .clock     (clock),
-        .reset     (reset),
-        .cmd_valid (cmd_valid),
-        .cmd_inst  (cmd_inst),
-        .cmd_ready (cmd_ready),
-        .cmd_done  (cmd_done),
-        .cmd_error (cmd_error),
-        .core_busy (busy),
-        .done      (done),
-        .error     (error)
+        .clock        (clock),
+        .reset        (reset),
+        .cmd_valid    (cmd_valid),
+        .cmd_inst     (cmd_inst),
+        .cmd_ready    (cmd_ready),
+        .cmd_done     (cmd_done),
+        .cmd_error    (cmd_error),
+        .core_busy    (busy),
+        .allow_finish (finish),
+        .command_active (command_active),
+        .done         (done),
+        .error        (error)
     );
 
     bnn_core_top #(
@@ -132,13 +151,9 @@ module bnn_sim_top (
     );
 
     always @(posedge clock) begin
-        if (!reset) begin
-            if (error)
-                $fatal(1, "bnn_sim_top: core reported cmd_error");
-            else if (done) begin
-                $display("bnn_sim_top: all commands completed");
-                $finish;
-            end
+        if (!reset && done) begin
+            $display("bnn_sim_top: all commands completed");
+            $finish;
         end
     end
 endmodule

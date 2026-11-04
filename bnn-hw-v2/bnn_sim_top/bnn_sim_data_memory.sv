@@ -13,7 +13,10 @@ bnn_sim_data_memory (统一数据存储器 DPI-C 适配层)
   strobe 的 bit i 对应 data 的第 i 个字节。
 - 核心 DMA 一拍默认 128 bit，本模块把每拍拆成两次 64-bit DPI 访问；
   若 DMA_DATA_WIDTH == 64，则每拍一次访问。
-- 读通道：命令握手后逐拍读取并返回 128-bit 数据，末拍 rd_data_last 为 1。
+- 读通道：命令握手后先通过 data_read_burst() 一次预取整笔突发，随后逐拍读取并
+  返回 128-bit 数据，末拍 rd_data_last 为 1。离线 testbench 可将预取实现为空操作，
+  仍由 data_read() 直接访问本地存储；网络化 testbench 用预取把整笔突发压缩成一次
+  远端事务。预取调用阻塞期间仿真时钟不推进，故 DMA 时序与周期数不变。
 - 写通道：命令握手后逐拍接收数据并写入，末拍握手后的下一拍输出单周期 wr_done。
 - 地址必须按拍对齐，长度不能为 0；违反时直接 $fatal。
 ============================================================================
@@ -51,6 +54,8 @@ module bnn_sim_data_memory #(
 );
     import "DPI-C" function longint unsigned data_read(
         input longint unsigned address);
+    import "DPI-C" function void data_read_burst(
+        input longint unsigned address, input longint unsigned bytes);
     import "DPI-C" function void data_write(
         input longint unsigned address, input longint unsigned data,
         input byte unsigned strobe);
@@ -99,6 +104,8 @@ module bnn_sim_data_memory #(
                         $fatal(1, "DMA read command has zero beats");
                     if (64'(rd_cmd_addr) % 64'(BEAT_BYTES) != 0)
                         $fatal(1, "DMA read address is not beat aligned");
+                    data_read_burst(64'(rd_cmd_addr),
+                                    64'(rd_cmd_len) * 64'(BEAT_BYTES));
                     rd_address   <= 64'(rd_cmd_addr);
                     rd_remaining <= rd_cmd_len;
                     rd_state     <= RD_DATA;

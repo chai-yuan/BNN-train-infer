@@ -12,7 +12,7 @@ PROFILE   := --trace $(BUILD)/case_trace.json --folded $(BUILD)/case_flame.folde
 
 FP_PACKAGE := ../bnn_core/bnn_fp_math.sv
 CORE_RTL   := $(FP_PACKAGE) $(filter-out $(FP_PACKAGE),$(wildcard ../bnn_core/*.sv))
-SIM_RTL    := $(sort $(wildcard sim_rtl/*.sv))
+SIM_RTL    := $(sort $(wildcard ../bnn_sim_top/*.sv))
 
 .PHONY: all build test run gen check clean help
 .DEFAULT_GOAL := all

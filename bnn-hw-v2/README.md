@@ -1,6 +1,6 @@
 # BNN 硬件加速器 v2 (`bnn-hw-v2`)
 
-本目录包含 BNN v2 计算核心的可综合 SystemVerilog RTL 实现（`bnn_core/`）、基于 Verilator + DPI-C 的完整仿真与回归环境（`sim/`），以及待接入片外 AXI4 总线的顶层骨架（`bnn_top.sv`）。
+本目录包含 BNN v2 计算核心的可综合 SystemVerilog RTL 实现（`bnn_core/`）、供各 C++ testbench 共用的 Verilator 仿真硬件顶层（`bnn_sim_top/`）、基于 Verilator + DPI-C 的离线回归环境（`simple_test/`）与 TCP 协同仿真环境（`remote_sim/`），以及待接入片外 AXI4 总线的顶层骨架（`bnn_top.sv`）。
 
 ## 目录与模块划分
 
@@ -18,7 +18,9 @@ bnn-hw-v2/
 │   ├── sram_result_wrapper.sv # Result SRAM 浅包装（带字节写掩码的单端口 1RW SRAM 宏，默认 4096 x 128-bit）
 │   ├── bnn_output_accum.sv    # 结果 SRAM 访问层：跨 K 块 FP32 覆盖/累加后处理与 session 握手
 │   └── bnn_output_writer.sv   # Output SRAM -> 外部内存 2D 步长突发写回与尾列字节掩码生成
-├── sim/                       # Verilator + DPI-C 仿真层、CLI 运行器与全套回归测试
+├── bnn_sim_top/               # Verilator 仿真硬件顶层（DPI-C 命令流/数据存储器适配，供多个 C++ testbench 复用）
+├── simple_test/               # Verilator + DPI-C 离线回归：CLI 运行器与全套固定用例
+├── remote_sim/                # Verilator + TCP 协同仿真：命令/内存 RPC server 与 mock 客户端
 └── bnn_top.sv                 # 外层 AXI4 + 128-bit 指令接口顶层封装骨架（尚未接入内部引擎）
 ```
 
@@ -95,7 +97,7 @@ bnn-hw-v2/
 
 ## 仿真验证
 
-[`sim/`](sim/README.md) 当前提供固定 Qwen3 W1A8 回归用例：取自 Qwen3-zh-5k 第 0 层
+[`simple_test/`](simple_test/README.md) 当前提供固定 Qwen3 W1A8 回归用例：取自 Qwen3-zh-5k 第 0 层
 `blk.0.attn_q.weight`（K=512、N=512、G=128），M=16，包含
 
 - `full_i8`：`BNN_OP_GEMM`，K=512，跨 4 个 K 块累加；
@@ -108,19 +110,39 @@ bnn-accelerator v2 语义生成，并与 soft 后端逐位交叉验证。校验�
 记录当前基线总周期，供后续性能对比。
 
 ```sh
-make -C bnn-hw-v2/sim test    # 构建、运行并校验固定用例
-make -C bnn-hw-v2/sim run     # 只运行
-make -C bnn-hw-v2/sim check   # 校验上一次运行结果
-make -C bnn-hw-v2/sim gen     # 从 Qwen3-zh-5k GGUF 重新生成用例（需要 numpy）
+make -C bnn-hw-v2/simple_test test    # 构建、运行并校验固定用例
+make -C bnn-hw-v2/simple_test run     # 只运行
+make -C bnn-hw-v2/simple_test check   # 校验上一次运行结果
+make -C bnn-hw-v2/simple_test gen     # 从 Qwen3-zh-5k GGUF 重新生成用例（需要 numpy）
 ```
 
-详细说明见 [`sim/README.md`](sim/README.md)。注意 v2 RTL 按每个 128 特征 COMPUTE tile
+详细说明见 [`simple_test/README.md`](simple_test/README.md)。注意 v2 RTL 按每个 128 特征 COMPUTE tile
 独立量化，K>128 的 FP32 任务不符合 bnn-accelerator 的完整逻辑行量化语义，因此 FP32
 负载固定为 K=128。
+
+## 远程协同仿真 (`remote_sim/`)
+
+`remote_sim/` 提供一个最小化的 TCP 协同仿真：仿真进程在本地监听，上层软件栈作为
+客户端通过 16 字节头 + payload 的二进制协议发送 64-bit 指令、响应内存读写，并接收
+指令完成回包。指令一次一条（收到 `CMD_DONE` 后再发下一条）；仿真在无命令时不推进
+时钟，因此周期数不随网络延迟变化。读通道在 DMA 命令握手时用一条 `READ_BURST`
+预取整笔突发，后续逐 64-bit 读命中本地缓存。固定用例经 TCP 跑出的周期为 106110，
+比文件驱动的 `simple_test` 多 63 拍，来自“等待完成后再发下一条”的协议开销；墙钟
+约 0.5s（预取前约 1.2s）。
+
+```sh
+make -C bnn-hw-v2/remote_sim          # 构建 build/Vbnn_sim_top
+make -C bnn-hw-v2/remote_sim test     # 用 tests/mock_client.py 跑通固定用例并比对输出
+make -C bnn-hw-v2/remote_sim run      # 在 127.0.0.1:12345 启动 server
+```
+
+协议与客户端实现分别见 `remote_sim/remote_sim_main.cpp` 和
+`remote_sim/tests/mock_client.py` 的文件头注释。根目录 `make ACCE=remote`
+会构建使用该后端的 `bnn-infer-v2`（RTL 为数值基准，F32 走硬件 per-tile 量化）。
 
 ## 备忘录
 
 - **当前微架构阶段**：`bnn_core/` 当前采用结构清晰的串行基线实现（如 `bnn_core_unit` 逐周期 1 元素点积、`bnn_core_array` 单组串行读权重、`bnn_weight_loader` 逐字节解包、`bnn_input_quant_buffer` 寄存器行缓冲与组合除法、`bnn_fp_math` 全精度 278-bit 定点对齐加法），用于锁定指令集、DMA 边界和端到端数值参考的一致性。
 - **后续演进方向**：
   1. **吞吐与面积/时序优化**：将 `bnn_core_unit` 升级为平衡组合/流水加法树，`bnn_core_array` 引入双组权重乒乓预取，`bnn_weight_loader` 改为拍宽并行拼接，`bnn_input_quant_buffer` 用行 SRAM 替代大位宽寄存器 MUX 并多拍化量化除法，收敛 `fp32_add_ftz` 移位位宽。
-  2. **外层总线与软件栈对接**：在 `bnn_top.sv` 中实现 AXI4 Master 突发拆分、4KiB 边界处理与总线错误上报，并基于 `sim/` 或设备驱动对接 `bnn-accelerator` v2 后端跑通完整模型推理。
+  2. **外层总线与软件栈对接**：在 `bnn_top.sv` 中实现 AXI4 Master 突发拆分、4KiB 边界处理与总线错误上报，并基于 `simple_test/` 或 `remote_sim/` 对接 `bnn-accelerator` v2 后端跑通完整模型推理。

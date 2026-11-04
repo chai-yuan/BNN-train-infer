@@ -2,7 +2,8 @@
 
 公共接口见 `bnn-accelerator.h`。当前 soft 参考后端实现接口声明的全部 5 种运算：
 I8 输入的 `GEMV / GEMM / DOT_GROUPS`，以及 F32 输入的 `GEMV_F32 / GEMM_F32`。
-本轮不新增硬件后端或 IPC transport。旧 Verilator 软件后端、C++ bridge、
+软件后端之外，`remote-bnn-accelerator.c` 通过 TCP 对接 `bnn-hw-v2/remote_sim`
+的 RTL 仿真，RTL 是该后端的数值基准。旧 Verilator 软件后端、C++ bridge、
 bridge/context 专项及 `tests/trace` 已移除；旧 RTL 与独立自检保留作参考。
 
 ## 边界与兼容性
@@ -93,6 +94,22 @@ caps 表示完整后端对调用者提供的能力，包括内部 tiling 和必�
 不是 IPC wire format，不能直接 memcpy 给另一进程作为设备协议。
 任务完成必须意味着结果已写回且可读，不仅是计算核心接收了最后一个结果。
 具体消息协议、资源 ID、传输、超时与恢复机制留待硬件设计阶段。
+
+## Remote RTL backend
+
+`remote-bnn-accelerator.c` 用同一套 API 通过 TCP 对接 `bnn-hw-v2/remote_sim`：
+
+```sh
+make -C bnn-hw-v2/remote_sim run        # 先在 127.0.0.1:12345 启动仿真
+make ACCE=remote
+./bnn-infer-v2 llm qwen3-zh-5k.gguf --ids ids.txt --steps 1 --ctx 8
+```
+
+该后端以 RTL 为数值基准：F32 运算走硬件按 128 tile 的动态量化，I8 走 INT8 直通。
+后端负责按 (out tile, K tile) 打包 18 字节权重、生成 LOAD/COMPUTE/WRITEBACK
+指令序列，并在执行期间应答仿真器的 DMA 突发读预取与 8 字节内存读写。
+`BNN_REMOTE_ADDR`（默认 `127.0.0.1:12345`）和 `BNN_REMOTE_MEM_BYTES`
+（默认 512 MiB）分别配置连接地址和设备内存大小。
 
 ## 回归
 

@@ -37,7 +37,7 @@ def load_memory(path):
         return path.read_bytes()
     except OSError as error:
         raise SystemExit(f"FAIL: cannot read {path}: {error}\n"
-                         f"      run `make -C bnn-hw-v2/sim test` first")
+                         f"      run `make -C bnn-hw-v2/simple_test test` first")
 
 
 def load_golden(path):

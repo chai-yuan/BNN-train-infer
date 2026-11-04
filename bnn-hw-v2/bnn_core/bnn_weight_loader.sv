@@ -15,8 +15,8 @@ bnn_weight_loader (外部内存紧密排列权重 -> Weight SRAM)
 - 起始地址按 BEAT_BYTES 对齐；连续分块由软件将各块占用空间补齐至整拍边界。
   仅发一笔 DMA 读，长度 ceil(N * WEIGHT_BYTES / BEAT_BYTES)，完整握手接收最后一拍，忽略
   其中超出 N 条记录的高位字节。mem_rd_data_last 仅作协议断言，不用它提前终止事务。
-- 简单单拍缓存，不做乒乓或流水：接收一拍后逐周期取一字节，记录可跨任意拍边界；每拼好一条
-  暂停拆字节，以一个 wsram_wen 周期将完整权重写入 WEIGHT_BASE_ADDR 起的连续地址。
+- 采用流式字节齿轮箱（Gearbox）缓存：支持单周期并行接收整拍 DMA 数据与写出整条权重记录，
+  记录可跨任意拍边界；当缓存字节数 >= WEIGHT_BYTES 时直接将低位写入 SRAM 并可同拍拼接新拍。
 - 有效记录之后补全 0 至 ODMA_FP32_NUM 的整数倍；最后一次 SRAM 写入沿之后才报告 done。
   同步 reset 丢弃内部在途状态并禁用命令、ready 与写使能，不清除外部内存 / SRAM。
 ============================================================================
@@ -56,28 +56,27 @@ module bnn_weight_loader #(
     output wire [SRAM_ADDR_WIDTH-1:0]       wsram_waddr,
     output wire [WEIGHT_WIDTH-1:0]          wsram_wdata
 );
-    localparam int unsigned WEIGHT_BYTES = WEIGHT_WIDTH / 8;
-    localparam int unsigned BEAT_BYTES = DMA_DATA_WIDTH / 8;
-    localparam int unsigned BYTE_COUNT_WIDTH = (BEAT_BYTES > 1) ? $clog2(BEAT_BYTES + 1) : 1;
-    localparam int unsigned WEIGHT_BYTE_WIDTH = (WEIGHT_BYTES > 1) ? $clog2(WEIGHT_BYTES) : 1;
+    localparam int unsigned WEIGHT_BYTES    = WEIGHT_WIDTH / 8;
+    localparam int unsigned BEAT_BYTES      = DMA_DATA_WIDTH / 8;
+    localparam int unsigned BUF_BYTES       = WEIGHT_BYTES + BEAT_BYTES - 1;
+    localparam int unsigned BUF_WIDTH       = BUF_BYTES * 8;
+    localparam int unsigned BUF_COUNT_WIDTH = $clog2(BUF_BYTES + 1);
     localparam int unsigned PAD_COUNT_WIDTH = (ODMA_FP32_NUM > 1) ? $clog2(ODMA_FP32_NUM) : 1;
 
-    typedef enum logic [2:0] {
-        IDLE, COMMAND, RECEIVE, UNPACK, WRITE_WEIGHT, WRITE_PADDING
+    typedef enum logic [1:0] {
+        IDLE, COMMAND, STREAM, WRITE_PADDING
     } state_t;
     state_t state;
 
     logic done_reg;
-    logic [ADDR_WIDTH-1:0] source_addr;
-    logic [DMA_LEN_WIDTH-1:0] burst_len;
-    logic [DMA_LEN_WIDTH-1:0] beats_left;
+    logic [ADDR_WIDTH-1:0]       source_addr;
+    logic [DMA_LEN_WIDTH-1:0]    burst_len;
+    logic [DMA_LEN_WIDTH-1:0]    beats_left;
     logic [CHAN_COUNT_WIDTH-1:0] rows_left;
-    logic [PAD_COUNT_WIDTH-1:0] padding_left;
-    logic [DMA_DATA_WIDTH-1:0] beat_buffer;
-    logic [BYTE_COUNT_WIDTH-1:0] bytes_left;
-    logic [WEIGHT_BYTE_WIDTH-1:0] weight_byte;
-    logic [WEIGHT_WIDTH-1:0] weight_buffer;
-    logic [SRAM_ADDR_WIDTH-1:0] write_addr;
+    logic [PAD_COUNT_WIDTH-1:0]  padding_left;
+    logic [BUF_WIDTH-1:0]        acc_buf;
+    logic [BUF_COUNT_WIDTH-1:0]  buf_bytes;
+    logic [SRAM_ADDR_WIDTH-1:0]  write_addr;
 
     wire [63:0] cfg_beats = (64'(cfg_weight_rows_n) * 64'(WEIGHT_BYTES)
                            + 64'(BEAT_BYTES) - 64'd1) / 64'(BEAT_BYTES);
@@ -85,93 +84,111 @@ module bnn_weight_loader #(
                              - 64'(cfg_weight_rows_n) % 64'(ODMA_FP32_NUM))
                              % 64'(ODMA_FP32_NUM);
 
-    assign busy = !reset && (state != IDLE);
-    assign done = !reset && done_reg;
+    // 当拍是否已攒够一条完整权重并可写出到 SRAM
+    wire can_write_weight = (state == STREAM) && (buf_bytes >= BUF_COUNT_WIDTH'(WEIGHT_BYTES));
+
+    // 扣除当拍可能消费的 WEIGHT_BYTES 后，缓存内剩余的字节数
+    wire [BUF_COUNT_WIDTH-1:0] rem_bytes = can_write_weight
+                                         ? (buf_bytes - BUF_COUNT_WIDTH'(WEIGHT_BYTES))
+                                         : buf_bytes;
+
+    // 只要还有未接收的拍，且当拍消费后剩余字节数不足一条权重（保证拼入新拍后不溢出 BUF_BYTES），即可接收
+    assign mem_rd_data_ready = !reset && (state == STREAM)
+                            && (beats_left != '0)
+                            && (rem_bytes < BUF_COUNT_WIDTH'(WEIGHT_BYTES));
+
+    wire dma_fire = mem_rd_data_valid && mem_rd_data_ready;
+
+    assign busy             = !reset && (state != IDLE);
+    assign done             = !reset && done_reg;
     assign mem_rd_cmd_valid = !reset && (state == COMMAND);
-    assign mem_rd_cmd_addr = source_addr;
-    assign mem_rd_cmd_len = burst_len;
-    assign mem_rd_data_ready = !reset && (state == RECEIVE);
-    assign wsram_wen = !reset && ((state == WRITE_WEIGHT) || (state == WRITE_PADDING));
-    assign wsram_waddr = write_addr;
-    assign wsram_wdata = (!reset && (state == WRITE_WEIGHT)) ? weight_buffer : '0;
+    assign mem_rd_cmd_addr  = source_addr;
+    assign mem_rd_cmd_len   = burst_len;
+    assign wsram_wen        = !reset && (can_write_weight || (state == WRITE_PADDING));
+    assign wsram_waddr      = write_addr;
+    assign wsram_wdata      = (!reset && can_write_weight) ? acc_buf[WEIGHT_WIDTH-1:0] : '0;
+
+    // 并行移位与字节拼接逻辑（rem_bytes 在 dma_fire 时严格位于 0 .. WEIGHT_BYTES-1）
+    logic [BUF_WIDTH-1:0]       shifted_buf;
+    logic [BUF_WIDTH-1:0]       next_acc_buf;
+    logic [BUF_COUNT_WIDTH-1:0] next_buf_bytes;
+
+    always_comb begin
+        shifted_buf    = can_write_weight ? (acc_buf >> WEIGHT_WIDTH) : acc_buf;
+        next_acc_buf   = shifted_buf;
+        next_buf_bytes = rem_bytes;
+
+        if (dma_fire) begin
+            for (int unsigned i = 0; i < WEIGHT_BYTES; i++) begin
+                if (rem_bytes == BUF_COUNT_WIDTH'(i)) begin
+                    next_acc_buf = shifted_buf | (BUF_WIDTH'(mem_rd_data) << (i * 8));
+                end
+            end
+            next_buf_bytes = rem_bytes + BUF_COUNT_WIDTH'(BEAT_BYTES);
+        end
+    end
 
     always_ff @(posedge clock) begin
         if (reset) begin
-            state <= IDLE;
-            done_reg <= 1'b0;
-            source_addr <= '0;
-            burst_len <= '0;
-            beats_left <= '0;
-            rows_left <= '0;
+            state        <= IDLE;
+            done_reg     <= 1'b0;
+            source_addr  <= '0;
+            burst_len    <= '0;
+            beats_left   <= '0;
+            rows_left    <= '0;
             padding_left <= '0;
-            beat_buffer <= '0;
-            bytes_left <= '0;
-            weight_byte <= '0;
-            weight_buffer <= '0;
-            write_addr <= WEIGHT_BASE_ADDR;
+            acc_buf      <= '0;
+            buf_bytes    <= '0;
+            write_addr   <= WEIGHT_BASE_ADDR;
         end else begin
             done_reg <= 1'b0;
             case (state)
                 IDLE: begin
                     if (start) begin
-                        source_addr <= cfg_src_base_addr;
-                        burst_len <= DMA_LEN_WIDTH'(cfg_beats);
-                        beats_left <= DMA_LEN_WIDTH'(cfg_beats);
-                        rows_left <= cfg_weight_rows_n;
+                        source_addr  <= cfg_src_base_addr;
+                        burst_len    <= DMA_LEN_WIDTH'(cfg_beats);
+                        beats_left   <= DMA_LEN_WIDTH'(cfg_beats);
+                        rows_left    <= cfg_weight_rows_n;
                         padding_left <= PAD_COUNT_WIDTH'(cfg_padding);
-                        weight_byte <= '0;
-                        weight_buffer <= '0;
-                        write_addr <= WEIGHT_BASE_ADDR;
-                        state <= COMMAND;
+                        acc_buf      <= '0;
+                        buf_bytes    <= '0;
+                        write_addr   <= WEIGHT_BASE_ADDR;
+                        state        <= COMMAND;
                     end
                 end
                 COMMAND: begin
                     if (mem_rd_cmd_ready)
-                        state <= RECEIVE;
+                        state <= STREAM;
                 end
-                RECEIVE: begin
-                    if (mem_rd_data_valid) begin
-                        beat_buffer <= mem_rd_data;
-                        bytes_left <= BYTE_COUNT_WIDTH'(BEAT_BYTES);
+                STREAM: begin
+                    acc_buf   <= next_acc_buf;
+                    buf_bytes <= next_buf_bytes;
+
+                    if (dma_fire) begin
                         beats_left <= beats_left - DMA_LEN_WIDTH'(1);
-                        state <= UNPACK;
                     end
-                end
-                UNPACK: begin
-                    weight_buffer[8 * int'(weight_byte) +: 8] <= beat_buffer[7:0];
-                    beat_buffer <= beat_buffer >> 8;
-                    bytes_left <= bytes_left - BYTE_COUNT_WIDTH'(1);
-                    if (weight_byte == WEIGHT_BYTE_WIDTH'(WEIGHT_BYTES - 1)) begin
-                        weight_byte <= '0;
-                        state <= WRITE_WEIGHT;
-                    end else begin
-                        weight_byte <= weight_byte + WEIGHT_BYTE_WIDTH'(1);
-                        if (bytes_left == BYTE_COUNT_WIDTH'(1))
-                            state <= RECEIVE;
-                    end
-                end
-                WRITE_WEIGHT: begin
-                    // 本沿 SRAM 真正写入；末记录所在拍已完整接收，其余高字节直接丢弃。
-                    write_addr <= write_addr + SRAM_ADDR_WIDTH'(1);
-                    rows_left <= rows_left - CHAN_COUNT_WIDTH'(1);
-                    if (rows_left == CHAN_COUNT_WIDTH'(1)) begin
-                        if (padding_left != '0) begin
-                            state <= WRITE_PADDING;
-                        end else begin
-                            state <= IDLE;
-                            done_reg <= 1'b1;
+
+                    if (can_write_weight) begin
+                        write_addr <= write_addr + SRAM_ADDR_WIDTH'(1);
+                        rows_left  <= rows_left - CHAN_COUNT_WIDTH'(1);
+                        // 末条有效权重写入完成，丢弃缓存内剩余的高位填充字节
+                        if (rows_left == CHAN_COUNT_WIDTH'(1)) begin
+                            acc_buf   <= '0;
+                            buf_bytes <= '0;
+                            if (padding_left != '0) begin
+                                state <= WRITE_PADDING;
+                            end else begin
+                                state    <= IDLE;
+                                done_reg <= 1'b1;
+                            end
                         end
-                    end else if (bytes_left != '0) begin
-                        state <= UNPACK;
-                    end else begin
-                        state <= RECEIVE;
                     end
                 end
                 WRITE_PADDING: begin
-                    write_addr <= write_addr + SRAM_ADDR_WIDTH'(1);
+                    write_addr   <= write_addr + SRAM_ADDR_WIDTH'(1);
                     padding_left <= padding_left - PAD_COUNT_WIDTH'(1);
                     if (padding_left == PAD_COUNT_WIDTH'(1)) begin
-                        state <= IDLE;
+                        state    <= IDLE;
                         done_reg <= 1'b1;
                     end
                 end
@@ -208,7 +225,7 @@ module bnn_weight_loader #(
                 assert (mem_rd_data_last == (beats_left == DMA_LEN_WIDTH'(1)))
                     else $fatal(1, "Weight DMA last does not match commanded burst length");
             end
-            if (state == WRITE_WEIGHT && rows_left == CHAN_COUNT_WIDTH'(1)) begin
+            if (can_write_weight && rows_left == CHAN_COUNT_WIDTH'(1)) begin
                 assert (beats_left == '0)
                     else $fatal(1, "Weight write completed before consuming the DMA burst");
             end

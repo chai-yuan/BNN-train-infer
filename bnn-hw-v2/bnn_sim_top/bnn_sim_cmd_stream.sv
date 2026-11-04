@@ -10,7 +10,9 @@ bnn_sim_cmd_stream (线性命令流发生器)
     longint unsigned cmd_get();   // 返回下一条 64-bit 指令并推进游标
 - 空闲时若 cmd_check() 为真，调用 cmd_get() 取出一条指令并保持 cmd_valid；
   核心 cmd_ready 后立即回到空闲，继续取指，因此命令是线性连续供应的。
-- 无更多指令、无在途命令且核心/DMA 空闲时 done 保持为高。
+- allow_finish 由 testbench 在确认不会再有新指令时拉高；此前即使队列为空也保持
+  done 为低，避免交互式仿真在两条指令之间提前结束。
+- allow_finish 有效、无在途命令且核心/DMA 空闲时 done 保持为高。
 - 核心返回 cmd_error 时停止取指并保持 error 为高。
 - reset 期间不调用任何 DPI 函数；C++ 侧应在 reset 时重置命令游标。
 ============================================================================
@@ -26,6 +28,8 @@ module bnn_sim_cmd_stream (
     input  wire       cmd_error,
 
     input  wire       core_busy,
+    input  wire       allow_finish,
+    output wire       command_active,
     output wire       done,
     output wire       error
 );
@@ -42,6 +46,7 @@ module bnn_sim_cmd_stream (
 
     assign cmd_valid = !reset && (state == PRESENT);
     assign cmd_inst  = inst;
+    assign command_active = !reset && ((state == PRESENT) || outstanding);
     assign done      = !reset && done_reg;
     assign error     = !reset && error_reg;
 
@@ -66,7 +71,7 @@ module bnn_sim_cmd_stream (
                     if (cmd_check() != 0) begin
                         inst  <= 64'(cmd_get());
                         state <= PRESENT;
-                    end else if (!outstanding && !core_busy) begin
+                    end else if (!outstanding && !core_busy && allow_finish) begin
                         done_reg <= 1'b1;
                     end
                 end
