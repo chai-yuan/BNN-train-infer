@@ -127,7 +127,7 @@ make -C bnn-hw-v2/simple_test gen     # 从 Qwen3-zh-5k GGUF 重新生成用例�
 客户端通过 16 字节头 + payload 的二进制协议发送 64-bit 指令、响应内存读写，并接收
 指令完成回包。指令一次一条（收到 `CMD_DONE` 后再发下一条）；仿真在无命令时不推进
 时钟，因此周期数不随网络延迟变化。读通道在 DMA 命令握手时用一条 `READ_BURST`
-预取整笔突发，后续逐 64-bit 读命中本地缓存。固定用例经 TCP 跑出的周期为 106110，
+预取整笔突发，后续逐 64-bit 读命中本地缓存。固定用例经 TCP 跑出的周期为 101890，
 比文件驱动的 `simple_test` 多 63 拍，来自“等待完成后再发下一条”的协议开销；墙钟
 约 0.5s（预取前约 1.2s）。
 
@@ -161,9 +161,9 @@ make -C bnn-hw-v2/sta FAMILY=H7CL
 
 报告中的 Fmax 由 `1/(CLK_PERIOD - slack)` 外推得到；它是无布线/CTS 的理想时钟
 post-synthesis 上界，真实 Fmax 需用 OpenROAD/OpenSTA 在 P&R 后配合真实 SRAM 宏
-重新测量。当前基线（2026-11-05，H7CR，`TARGET_ASIC` SRAM 占位）：典型 50.4 MHz，
-最差 `ss_rcworst_1p08_125` 约 27.0 MHz，逻辑面积约 292,198 µm²；关键路径位于
-`u_input_quant_buffer` 的 sample MUX + INT8 量化除法。详细说明见
+重新测量。当前基线（2026-11-05，H7CR，`TARGET_ASIC` SRAM 占位）：典型 88.5 MHz，
+最差 `ss_rcworst_1p08_125` 约 47.2 MHz，逻辑面积约 271,677 µm²；关键路径位于
+`u_output_accum` 的 Result SRAM 占位模型寄存器路径。详细说明见
 [`sta/README.md`](sta/README.md)。
 
 ## 备忘录

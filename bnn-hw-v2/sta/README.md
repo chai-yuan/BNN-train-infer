@@ -130,14 +130,16 @@ Setup（Fmax）应至少覆盖：
 
 | Corner | Slack @100ns | Fmax |
 | --- | ---: | ---: |
-| `typ_tt_1p2_25` | 80.16 ns | 50.4 MHz |
-| `ss_rcworst_1p2_m40` | 75.82 ns | 41.4 MHz |
-| `ss_cworst_1p08_m40` | 63.49 ns | 27.4 MHz |
-| `ss_rcworst_1p08_125` | 63.03 ns | **27.0 MHz** |
+| `typ_tt_1p2_25` | 88.70 ns | 88.5 MHz |
+| `ss_rcworst_1p2_m40` | 86.33 ns | 73.1 MHz |
+| `ss_cworst_1p08_m40` | 79.11 ns | 47.9 MHz |
+| `ss_rcworst_1p08_125` | 78.80 ns | **47.2 MHz** |
 
-- 关键路径：`u_input_quant_buffer.sample_index` → `row_storage` 的 128 选 1
-  MUX → `quantize_int8_ftz` 的 31-bit 除法 → `quantized_row`。
-- 逻辑面积约 **292,198 µm²**，137,788 个标准单元，13,934 个 DFF。
+- 关键路径：`u_output_accum` 的 Result SRAM 占位模型（`TARGET_ASIC` 分支）寄存器
+  路径；替换真实 SRAM 宏后需重新测量。
+- 逻辑面积约 **271,677 µm²**，129,555 个标准单元，12,702 个 DFF。
+- 相对上一版 RTL（`u_input_quant_buffer` 优化前）：典型 50.4 → 88.5 MHz，
+  最差 corner 27.0 → 47.2 MHz，面积 292,198 → 271,677 µm²。
 - 这些数字会随 RTL、`FAMILY`、`MAP_CORNER` 和综合脚本变化；请以本次运行生成的
   `reports/<RUN>/report.md` 为准。`reports/latest` 指向最近一次报告。
 
