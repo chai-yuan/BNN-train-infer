@@ -15,19 +15,23 @@ sram_result_wrapper（对 FPGA BRAM / ASIC 单端口 1RW SRAM 宏的浅包装）
   b) 累加写：WRITE_BACK 拍写回（en=1, we=1），天然与 a) 错开拍；
   c) 写回读：session 空闲时由 bnn_output_writer 发起读（en=1, we=0）。
   三者互斥，故不需要仲裁等待，单端口化不损失吞吐。
-- 由于读延迟固定为 OSRAM_READ_LATENCY，累加路径在 RECEIVE 与 WRITE_BACK
-  之间插入 SETTLE 等待，保证写回时读数据已对齐；OSRAM_READ_LATENCY = 1 时
-  SETTLE 不进入，时序与双端口版本逐拍一致。
+- 由于读延迟固定为 OSRAM_READ_LATENCY，累加路径在 RECEIVE/等待读数据与
+  LATCH_RDATA 之间插入 SETTLE，保证读数据在专拍锁存；OSRAM_READ_LATENCY = 1
+  时 SETTLE 不进入。
 
 运行规则：
 - 空闲时 session_start 锁存 cfg_accum_enable / cfg_total_beats，地址从 0 递增。
   cfg_total_beats 不得超过 OSRAM_DEPTH；零拍 session 立即返回 done。
 - 每次握手锁存一拍 odma_data：
-  * 覆盖模式：下一拍直接写入结果 SRAM；
-  * 累加模式：接收沿同时发起同步读，等 OSRAM_READ_LATENCY 拍取回旧值后，
-    逐路组合计算 fp32_add_ftz 并写回。有限结果向零截断，次正规数 FTZ，非 RNE。
+  * 覆盖模式：经 LATCH_RDATA/ACCUM_CALC 将 incoming_reg 锁存到 wdata_reg 后写回；
+  * 累加模式：接收沿同时发起同步读，等 OSRAM_READ_LATENCY 拍取回旧值，在
+    LATCH_RDATA 专拍锁存 rdata_reg，再在 ACCUM_CALC 专拍用纯寄存器输入
+    逐路计算 fp32_add_ftz 并锁存 wdata_reg。有限结果向零截断，次正规数 FTZ，
+    非 RNE。
   不追求连续拍吞吐，写完一拍后才接收下一拍；session_done 仅在最后写入完成沿
   产生一拍。
+- 写数据通路两级斩断：SRAM 读输出 -> rdata_reg -> fp32_add_ftz -> wdata_reg ->
+  SRAM 写端口，避免 SRAM T_cq + 加法 + SRAM T_su 落在同一拍。
 - session_busy 期间读端口归累加使用，不接受 writer 读请求；上层保证二者互斥。
   空闲时 osram_ren 发起同步读，经 OSRAM_READ_LATENCY 级流水输出，与
   Weight SRAM 的读延迟约定一致。
@@ -67,13 +71,26 @@ module bnn_output_accum #(
     localparam int unsigned WAIT_CYCLES = (OSRAM_READ_LATENCY > 1) ? (OSRAM_READ_LATENCY - 1) : 0;
     localparam int unsigned WAIT_WIDTH  = (WAIT_CYCLES > 1) ? $clog2(WAIT_CYCLES) : 1;
 
-    typedef enum logic [1:0] {IDLE, RECEIVE, SETTLE, WRITE_BACK} state_t;
+    // 状态机拆分为：空闲 -> 接收并发起读 -> 等待 SRAM 读延迟 -> 锁存读数据
+    // (或加法 S1) -> 锁存写数据 (加法 S2) -> 写回 SRAM
+    typedef enum logic [2:0] {
+        IDLE,
+        RECEIVE,
+        SETTLE,      // 等待 SRAM 读出有效 (当 OSRAM_READ_LATENCY > 1 时使用)
+        LATCH_RDATA, // 专拍锁存 osram_rdata (隔离真 SRAM 的巨大 T_cq 延迟)
+        ACCUM_CALC,  // 专拍计算 fp32_add_ftz 并锁存到 wdata_reg (隔离真 SRAM 的 T_su)
+        WRITE_BACK   // 纯寄存器驱动 SRAM 写端口
+    } state_t;
+
     state_t state;
     logic accum_reg, done_reg;
     logic [BEAT_COUNT_WIDTH-1:0] remaining_reg;
     logic [OSRAM_ADDR_WIDTH-1:0] address_reg;
     logic [WAIT_WIDTH-1:0]       wait_reg;
-    logic [DATA_WIDTH-1:0]       incoming_reg, write_data;
+    logic [DATA_WIDTH-1:0]       incoming_reg;
+    logic [DATA_WIDTH-1:0]       rdata_reg;
+    logic [DATA_WIDTH-1:0]       wdata_reg;
+    logic [DATA_WIDTH-1:0]       accum_comb_out;
     logic                        sram_we, sram_re, sram_en;
     logic [OSRAM_ADDR_WIDTH-1:0] sram_addr;
 
@@ -97,19 +114,16 @@ module bnn_output_accum #(
     assign sram_en   = sram_we || sram_re;
     assign sram_addr = sram_we ? address_reg : read_address;
 
-    // 累加数据通路：读回的旧值在 WRITE_BACK 拍已对齐（见下方 SETTLE 说明）。
+    // 累加组合计算：输入全部来自纯触发器 (rdata_reg 和 incoming_reg)，
+    // 不再直连 osram_rdata。
     always_comb begin
-        write_data = incoming_reg;
-        if (accum_reg) begin
-            for (int lane = 0; lane < ODMA_FP32_NUM; lane++)
-                write_data[lane*32 +: 32] = fp32_add_ftz(
-                    osram_rdata[lane*32 +: 32], incoming_reg[lane*32 +: 32]);
+        for (int lane = 0; lane < ODMA_FP32_NUM; lane++) begin
+            accum_comb_out[lane*32 +: 32] = fp32_add_ftz(
+                rdata_reg[lane*32 +: 32], incoming_reg[lane*32 +: 32]);
         end
     end
 
-    // ------------------------------------------------------------------------
-    // 结果 SRAM 存储体：浅包装，不含任何控制逻辑，不在复位时清零。
-    // ------------------------------------------------------------------------
+    // SRAM 的 wdata 端口直接由触发器 wdata_reg 驱动，零组合逻辑延迟。
     sram_result_wrapper #(
         .DATA_WIDTH   (DATA_WIDTH),
         .DEPTH        (OSRAM_DEPTH),
@@ -120,7 +134,7 @@ module bnn_output_accum #(
         .en    (sram_en),
         .we    (sram_we),
         .addr  (sram_addr),
-        .wdata (write_data),
+        .wdata (wdata_reg),
         .wstrb ({STRB_WIDTH{1'b1}}),
         .rdata (osram_rdata)
     );
@@ -135,6 +149,8 @@ module bnn_output_accum #(
             address_reg <= '0;
             wait_reg <= '0;
             incoming_reg <= '0;
+            rdata_reg <= '0;
+            wdata_reg <= '0;
         end else begin
             done_reg <= 1'b0;
             case (state)
@@ -153,9 +169,9 @@ module bnn_output_accum #(
                     if (odma_valid && odma_ready) begin
                         incoming_reg <= odma_data;
                         // T 拍发起读，rdata 在 T + OSRAM_READ_LATENCY 拍有效，
-                        // 因此累加模式需额外等待 OSRAM_READ_LATENCY-1 拍再写回。
+                        // 因此累加模式需额外等待 OSRAM_READ_LATENCY-1 拍。
                         if (WAIT_CYCLES == 0) begin
-                            state <= WRITE_BACK;
+                            state <= LATCH_RDATA;
                         end else begin
                             wait_reg <= WAIT_WIDTH'(WAIT_CYCLES - 1);
                             state <= SETTLE;
@@ -164,9 +180,17 @@ module bnn_output_accum #(
                 end
                 SETTLE: begin
                     if (wait_reg == '0)
-                        state <= WRITE_BACK;
+                        state <= LATCH_RDATA;
                     else
                         wait_reg <= wait_reg - 1'b1;
+                end
+                LATCH_RDATA: begin
+                    rdata_reg <= osram_rdata;
+                    state <= ACCUM_CALC;
+                end
+                ACCUM_CALC: begin
+                    wdata_reg <= accum_reg ? accum_comb_out : incoming_reg;
+                    state <= WRITE_BACK;
                 end
                 WRITE_BACK: begin
                     if (remaining_reg == BEAT_COUNT_WIDTH'(1)) begin
