@@ -1,5 +1,7 @@
 `default_nettype none
 
+// `define TARGET_ASIC
+
 /*
 ============================================================================
 sram_result_wrapper (Result SRAM 浅包装：带字节写掩码的单端口 1RW 同步存储)
@@ -27,9 +29,27 @@ module sram_result_wrapper #(
     input  wire [STRB_WIDTH-1:0] wstrb,
     output wire [DATA_WIDTH-1:0] rdata
 );
+
+
+`ifdef TARGET_ASIC
+
+    // 占位代码
+    logic [DATA_WIDTH-1:0] stub_reg;
+    always_ff @(posedge clock) begin
+        if (en) begin
+            stub_reg <= wdata ^ DATA_WIDTH'({we, addr, wstrb});
+        end
+    end
+    assign rdata = stub_reg;
+
+`elsif TARGET_FPGA
+
+
+`else // SIM
+
     logic [DATA_WIDTH-1:0] read_stage [0:READ_LATENCY-1];
 
-    (* ram_style = "block" *) logic [DATA_WIDTH-1:0] memory [0:DEPTH-1];
+    logic [DATA_WIDTH-1:0] memory [0:DEPTH-1];
 
     always_ff @(posedge clock) begin
         if (en && we) begin
@@ -42,13 +62,14 @@ module sram_result_wrapper #(
             read_stage[0] <= memory[addr];
     end
 
-    // 读输出流水级（READ_LATENCY = 1 时为空）。
     always_ff @(posedge clock) begin
         for (int stage = 1; stage < READ_LATENCY; stage++)
             read_stage[stage] <= read_stage[stage-1];
     end
 
     assign rdata = read_stage[READ_LATENCY-1];
+
+`endif
 
 `ifndef SYNTHESIS
     initial begin

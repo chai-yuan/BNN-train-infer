@@ -21,6 +21,7 @@ bnn-hw-v2/
 ├── bnn_sim_top/               # Verilator 仿真硬件顶层（DPI-C 命令流/数据存储器适配，供多个 C++ testbench 复用）
 ├── simple_test/               # Verilator + DPI-C 离线回归：CLI 运行器与全套固定用例
 ├── remote_sim/                # Verilator + TCP 协同仿真：命令/内存 RPC server 与 mock 客户端
+├── sta/                       # Yosys + OpenSTA 的 post-synthesis Fmax/面积分析报告
 └── bnn_top.sv                 # 外层 AXI4 + 128-bit 指令接口顶层封装骨架（尚未接入内部引擎）
 ```
 
@@ -130,6 +131,13 @@ make -C bnn-hw-v2/simple_test gen     # 从 Qwen3-zh-5k GGUF 重新生成用例�
 比文件驱动的 `simple_test` 多 63 拍，来自“等待完成后再发下一条”的协议开销；墙钟
 约 0.5s（预取前约 1.2s）。
 
+主循环内置周期级性能探针：每拍采样一次，统计每个探针的命中周期数、触发次数、
+平均/最长持续时间，进程退出时打印汇总及墙钟/仿真速度/等待主机的时长。增删探针只需
+编辑 `remote_sim_main.cpp` 中的 `register_probes()` 表项，主循环无需改动；
+`ProbeContext` 同时暴露顶层端口与 Verilator 内部层次（`context.dut.rootp`），可按需
+探测 RTL 内部信号，`add_state()` 还能对内部 FSM 状态寄存器生成逐状态周期直方图。
+`--probe-interval N` 每 N 拍打印一行增量，`--no-probes` 完全关闭采样与报告。
+
 ```sh
 make -C bnn-hw-v2/remote_sim          # 构建 build/Vbnn_sim_top
 make -C bnn-hw-v2/remote_sim test     # 用 tests/mock_client.py 跑通固定用例并比对输出
@@ -139,6 +147,24 @@ make -C bnn-hw-v2/remote_sim run      # 在 127.0.0.1:12345 启动 server
 协议与客户端实现分别见 `remote_sim/remote_sim_main.cpp` 和
 `remote_sim/tests/mock_client.py` 的文件头注释。根目录 `make ACCE=remote`
 会构建使用该后端的 `bnn-infer-v2`（RTL 为数值基准，F32 走硬件 per-tile 量化）。
+
+## 时序与面积分析 (`sta/`)
+
+`sta/` 使用 `sv2v` → `yosys` → `opensta` 对 `bnn_core_top` 做 post-synthesis 分析，
+自动输出每个 corner 的 Fmax、逻辑面积、DFF/组合单元数以及关键路径。默认使用
+H7CR (RVT) 和 4 个 setup corner，SRAM 使用 `TARGET_ASIC` 占位模型。
+
+```sh
+make -C bnn-hw-v2/sta            # 综合 + STA + reports/<run>/report.md
+make -C bnn-hw-v2/sta FAMILY=H7CL
+```
+
+报告中的 Fmax 由 `1/(CLK_PERIOD - slack)` 外推得到；它是无布线/CTS 的理想时钟
+post-synthesis 上界，真实 Fmax 需用 OpenROAD/OpenSTA 在 P&R 后配合真实 SRAM 宏
+重新测量。当前基线（2026-11-05，H7CR，`TARGET_ASIC` SRAM 占位）：典型 50.4 MHz，
+最差 `ss_rcworst_1p08_125` 约 27.0 MHz，逻辑面积约 292,198 µm²；关键路径位于
+`u_input_quant_buffer` 的 sample MUX + INT8 量化除法。详细说明见
+[`sta/README.md`](sta/README.md)。
 
 ## 备忘录
 

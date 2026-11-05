@@ -1,5 +1,7 @@
 `default_nettype none
 
+// `define TARGET_ASIC
+
 /*
 ============================================================================
 sram_weight_wrapper (Weight SRAM 浅包装：单端口 1RW 同步存储)
@@ -25,9 +27,26 @@ module sram_weight_wrapper #(
     input  wire [DATA_WIDTH-1:0] wdata,
     output wire [DATA_WIDTH-1:0] rdata
 );
+
+`ifdef TARGET_ASIC
+
+    // 占位代码
+    logic [DATA_WIDTH-1:0] stub_reg;
+    always_ff @(posedge clock) begin
+        if (en) begin
+            stub_reg <= wdata ^ DATA_WIDTH'({we, addr});
+        end
+    end
+    assign rdata = stub_reg;
+
+`elsif TARGET_FPGA
+
+
+`else // SIM
+
     logic [DATA_WIDTH-1:0] read_stage [0:READ_LATENCY-1];
 
-    (* ram_style = "block" *) logic [DATA_WIDTH-1:0] memory [0:DEPTH-1];
+    logic [DATA_WIDTH-1:0] memory [0:DEPTH-1];
 
     always_ff @(posedge clock) begin
         if (en && we)
@@ -42,6 +61,8 @@ module sram_weight_wrapper #(
     end
 
     assign rdata = read_stage[READ_LATENCY-1];
+
+`endif
 
 `ifndef SYNTHESIS
     initial begin

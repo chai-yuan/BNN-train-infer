@@ -29,8 +29,15 @@
 //
 // The DMA read path prefetches a whole burst with READ_BURST at the read
 // command handshake, so the per-word READ path normally hits a local cache.
+//
+// The main loop contains a cycle-probe framework. A probe is sampled once per
+// simulated cycle and accumulates active cycles, rising edges, and run lengths.
+// Add or remove probes in register_probes(); the loop itself stays untouched.
+// --no-probes disables sampling, --probe-interval N prints deltas every N
+// cycles, and the final report is printed when the simulation exits.
 
 #include "Vbnn_sim_top.h"
+#include "Vbnn_sim_top___024root.h"
 #include "verilated.h"
 
 #include <arpa/inet.h>
@@ -49,6 +56,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -395,6 +403,430 @@ void tick(Vbnn_sim_top& dut) {
     dut.eval();
 }
 
+// ---------------------------------------------------------------------------
+// Performance probes
+// ---------------------------------------------------------------------------
+// Each probe is a name, a description and a predicate over the current DUT
+// state. The main loop samples every probe once per simulated cycle, after the
+// clock edge, and tracks:
+//   active     cycles where the predicate was true
+//   starts     number of 0 -> 1 transitions
+//   avg-run    active / starts (mean run length)
+//   longest    longest consecutive active run
+//
+// ProbeContext exposes the top-level DUT ports and the Verilator root instance,
+// so probes can also read internal RTL signals (context.dut.rootp->..., using
+// the mangled names listed in build/Vbnn_sim_top___024root.h) when a top-level
+// port is not enough. Predicates may capture mutable state when a probe needs
+// more than level/edge tracking.
+//
+// State probes sample an internal FSM state register once per cycle and build a
+// per-state cycle histogram. They answer "how is this module spending its
+// cycles" faster than adding one level probe per state.
+//
+// To add a probe, append one entry in register_probes(). To remove a probe,
+// delete its entry. Neither change touches the main loop.
+
+struct ProbeContext {
+    const Vbnn_sim_top& dut;
+    std::uint64_t cycle;
+};
+
+struct ProbeStats {
+    std::uint64_t active_cycles = 0;
+    std::uint64_t activations = 0;
+    std::uint64_t longest_run = 0;
+    std::uint64_t current_run = 0;
+    std::uint64_t reported_active = 0;
+    std::uint64_t reported_activations = 0;
+    bool active = false;
+};
+
+struct Probe {
+    const char* name;
+    const char* description;
+    std::function<bool(const ProbeContext&)> predicate;
+    ProbeStats stats;
+};
+
+struct StateProbe {
+    const char* name;
+    std::function<int(const ProbeContext&)> state_of;
+    const char* const* state_names;
+    int state_count;
+    std::vector<std::uint64_t> cycles;
+    std::vector<std::uint64_t> reported_cycles;
+};
+
+class ProbeSet {
+public:
+    void add(const char* name, const char* description,
+             std::function<bool(const ProbeContext&)> predicate) {
+        probes_.push_back(Probe{name, description, std::move(predicate), ProbeStats{}});
+    }
+
+    template <std::size_t N>
+    void add_state(const char* name, std::function<int(const ProbeContext&)> state_of,
+                   const char* const (&state_names)[N]) {
+        state_probes_.push_back(StateProbe{name, std::move(state_of), state_names,
+                                           static_cast<int>(N),
+                                           std::vector<std::uint64_t>(N, 0),
+                                           std::vector<std::uint64_t>(N, 0)});
+    }
+
+    void sample(const ProbeContext& context) {
+        for (Probe& probe : probes_) {
+            const bool active = probe.predicate(context);
+            ProbeStats& stats = probe.stats;
+            if (active) {
+                ++stats.active_cycles;
+                ++stats.current_run;
+                if (!stats.active)
+                    ++stats.activations;
+                if (stats.current_run > stats.longest_run)
+                    stats.longest_run = stats.current_run;
+            } else {
+                stats.current_run = 0;
+            }
+            stats.active = active;
+        }
+        for (StateProbe& probe : state_probes_) {
+            const int state = probe.state_of(context);
+            if (state < 0)
+                continue;
+            const int index = state < probe.state_count ? state : probe.state_count - 1;
+            ++probe.cycles[index];
+        }
+    }
+
+    // Periodic delta: level probes in "name=+active/+starts" form, state probes
+    // in "name{STATE=+cycles,...}" form.
+    void print_delta(std::uint64_t cycles) {
+        std::printf("[probe] %llu cycles:", static_cast<unsigned long long>(cycles));
+        for (Probe& probe : probes_) {
+            ProbeStats& stats = probe.stats;
+            const std::uint64_t active = stats.active_cycles - stats.reported_active;
+            const std::uint64_t starts =
+                stats.activations - stats.reported_activations;
+            std::printf(" %s=+%llu/+%llu", probe.name,
+                        static_cast<unsigned long long>(active),
+                        static_cast<unsigned long long>(starts));
+            stats.reported_active = stats.active_cycles;
+            stats.reported_activations = stats.activations;
+        }
+        std::printf("\n");
+        if (state_probes_.empty())
+            return;
+        std::printf("[state] %llu cycles:", static_cast<unsigned long long>(cycles));
+        for (StateProbe& probe : state_probes_) {
+            std::printf(" %s{", probe.name);
+            bool first = true;
+            for (int i = 0; i < probe.state_count; ++i) {
+                const std::uint64_t delta = probe.cycles[i] - probe.reported_cycles[i];
+                probe.reported_cycles[i] = probe.cycles[i];
+                if (delta == 0)
+                    continue;
+                std::printf("%s%s=+%llu", first ? "" : ",", probe.state_names[i],
+                            static_cast<unsigned long long>(delta));
+                first = false;
+            }
+            std::printf("}");
+        }
+        std::printf("\n");
+    }
+
+    void print_summary(std::uint64_t cycles) const {
+        if (!probes_.empty()) {
+            std::printf("remote_sim: performance probes (%llu cycles)\n",
+                        static_cast<unsigned long long>(cycles));
+            std::printf("  %-18s %12s %9s %9s %10s %10s  %s\n", "probe", "active",
+                        "active%", "starts", "avg-run", "longest", "description");
+            for (const Probe& probe : probes_) {
+                const ProbeStats& stats = probe.stats;
+                const double share = cycles == 0
+                                         ? 0.0
+                                         : 100.0 * static_cast<double>(stats.active_cycles) /
+                                               static_cast<double>(cycles);
+                const std::uint64_t average =
+                    stats.activations == 0 ? 0 : stats.active_cycles / stats.activations;
+                std::printf("  %-18s %12llu %8.2f%% %9llu %10llu %10llu  %s\n",
+                            probe.name,
+                            static_cast<unsigned long long>(stats.active_cycles), share,
+                            static_cast<unsigned long long>(stats.activations),
+                            static_cast<unsigned long long>(average),
+                            static_cast<unsigned long long>(stats.longest_run),
+                            probe.description);
+            }
+        }
+        if (!state_probes_.empty()) {
+            std::printf("remote_sim: FSM state cycles (%llu cycles)\n",
+                        static_cast<unsigned long long>(cycles));
+            for (const StateProbe& probe : state_probes_) {
+                std::printf("  %-22s", probe.name);
+                bool any = false;
+                for (int i = 0; i < probe.state_count; ++i) {
+                    if (probe.cycles[i] == 0)
+                        continue;
+                    const double share = cycles == 0
+                                             ? 0.0
+                                             : 100.0 * static_cast<double>(probe.cycles[i]) /
+                                                   static_cast<double>(cycles);
+                    std::printf(" %s=%llu(%.1f%%)", probe.state_names[i],
+                                static_cast<unsigned long long>(probe.cycles[i]), share);
+                    any = true;
+                }
+                if (!any)
+                    std::printf(" (never active)");
+                std::printf("\n");
+            }
+        }
+    }
+
+private:
+    std::vector<Probe> probes_;
+    std::vector<StateProbe> state_probes_;
+};
+
+// ---- internal RTL signal accessors ----
+// Verilator-flat names from build/Vbnn_sim_top___024root.h. These are
+// simulation-only and must be updated if the RTL hierarchy changes.
+int controller_state(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__u_top_controller__DOT__state;
+}
+
+bool controller_input_int8(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__u_top_controller__DOT__input_int8 != 0;
+}
+
+int weight_loader_state(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__u_weight_loader__DOT__state;
+}
+
+int iqbuf_state(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__u_input_quant_buffer__DOT__state;
+}
+
+int array_state(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__u_core_array__DOT__state;
+}
+
+int unit_state(const ProbeContext& context) {
+    return context.dut.rootp
+        ->bnn_sim_top__DOT__u_core__DOT__u_core_array__DOT__g_unit__BRA__0__KET____DOT__u_unit__DOT__state;
+}
+
+int output_accum_state(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__u_output_accum__DOT__state;
+}
+
+int output_writer_state(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__u_output_writer__DOT__state;
+}
+
+bool core_idma_valid(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__idma_valid != 0;
+}
+
+bool core_idma_ready(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__idma_ready != 0;
+}
+
+bool core_odma_valid(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__odma_valid != 0;
+}
+
+bool core_odma_ready(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__u_core__DOT__odma_ready != 0;
+}
+
+bool mem_wr_data_ready(const ProbeContext& context) {
+    return context.dut.rootp->bnn_sim_top__DOT__mem_wr_data_ready != 0;
+}
+
+// ---- FSM encodings (must match the RTL typedefs) ----
+constexpr int kCtrlIdle = 0;
+constexpr int kCtrlLoadDrain = 1;
+constexpr int kCtrlLoadStart = 2;
+constexpr int kCtrlLoadWait = 3;
+constexpr int kCtrlLoadConfig = 4;
+constexpr int kCtrlComputeStart = 5;
+constexpr int kCtrlComputeWait = 6;
+constexpr int kCtrlComputeDrain = 7;
+constexpr int kCtrlWriteStart = 8;
+constexpr int kCtrlWriteWait = 9;
+
+constexpr int kIqCommand = 1;
+constexpr int kIqReceive = 2;
+constexpr int kIqScan = 3;
+constexpr int kIqScale = 4;
+constexpr int kIqQuantize = 5;
+constexpr int kIqOutputRow = 6;
+
+constexpr int kUnitIdle = 0;
+constexpr int kUnitDot = 1;
+constexpr int kUnitFpConv = 2;
+constexpr int kUnitWeightScale = 3;
+constexpr int kUnitRowScale = 4;
+constexpr int kUnitOutputData = 5;
+
+constexpr int kWriterCommand = 1;
+constexpr int kWriterReadRequest = 2;
+constexpr int kWriterReadReturn = 3;
+constexpr int kWriterSendData = 4;
+
+constexpr int kWeightLoaderStream = 2;
+
+const char* const kControllerStateNames[] = {
+    "IDLE", "LOAD_DRAIN", "LOAD_START", "LOAD_WAIT", "LOAD_CONFIG",
+    "COMPUTE_START", "COMPUTE_WAIT", "COMPUTE_DRAIN", "WRITE_START", "WRITE_WAIT",
+};
+const char* const kWeightLoaderStateNames[] = {
+    "IDLE", "COMMAND", "STREAM", "WRITE_PADDING",
+};
+const char* const kIqbufStateNames[] = {
+    "IDLE", "COMMAND", "RECEIVE", "SCAN", "SCALE", "QUANTIZE", "OUTPUT_ROW",
+};
+const char* const kArrayStateNames[] = {
+    "IDLE", "READ_REQUEST", "READ_RETURN", "SUBMIT", "WAIT_OUTPUT",
+};
+const char* const kUnitStateNames[] = {
+    "IDLE", "DOT", "FP_CONV", "WEIGHT_SCALE", "ROW_SCALE", "OUTPUT_DATA",
+};
+const char* const kOutputAccumStateNames[] = {
+    "IDLE", "RECEIVE", "SETTLE", "WRITE_BACK",
+};
+const char* const kOutputWriterStateNames[] = {
+    "IDLE", "COMMAND", "READ_REQUEST", "READ_RETURN", "SEND_DATA",
+    "WAIT_RESPONSE", "ROW_COMPLETE",
+};
+
+// ---- probe table: add or remove probes here ----
+void register_probes(ProbeSet& probes) {
+    // Top-level command/DMA activity.
+    probes.add("busy", "core or DMA busy",
+               [](const ProbeContext& context) { return context.dut.busy_out != 0; });
+    probes.add("cmd_active", "command in flight",
+               [](const ProbeContext& context) {
+                   return context.dut.command_active != 0;
+               });
+    probes.add("cmd_done", "command completion pulse",
+               [](const ProbeContext& context) {
+                   return context.dut.cmd_done_out != 0;
+               });
+    probes.add("cmd_error", "command rejection pulse",
+               [](const ProbeContext& context) {
+                   return context.dut.cmd_error_out != 0;
+               });
+    probes.add("idle", "no command and no DMA work",
+               [](const ProbeContext& context) {
+                   return context.dut.busy_out == 0 && context.dut.command_active == 0;
+               });
+
+    // Top-level command phases.
+    probes.add("load_phase", "top controller in LOAD phase",
+               [](const ProbeContext& context) {
+                   const int state = controller_state(context);
+                   return state >= kCtrlLoadDrain && state <= kCtrlLoadConfig;
+               });
+    probes.add("compute_phase", "top controller in COMPUTE phase",
+               [](const ProbeContext& context) {
+                   const int state = controller_state(context);
+                   return state >= kCtrlComputeStart && state <= kCtrlComputeDrain;
+               });
+    probes.add("write_phase", "top controller in WRITE phase",
+               [](const ProbeContext& context) {
+                   const int state = controller_state(context);
+                   return state >= kCtrlWriteStart && state <= kCtrlWriteWait;
+               });
+    probes.add("compute_int8", "COMPUTE phase with INT8 input",
+               [](const ProbeContext& context) {
+                   const int state = controller_state(context);
+                   return state >= kCtrlComputeStart && state <= kCtrlComputeDrain &&
+                          controller_input_int8(context);
+               });
+    probes.add("compute_fp32", "COMPUTE phase with FP32 input",
+               [](const ProbeContext& context) {
+                   const int state = controller_state(context);
+                   return state >= kCtrlComputeStart && state <= kCtrlComputeDrain &&
+                          !controller_input_int8(context);
+               });
+
+    // Compute pipeline: unit work versus row handoff.
+    probes.add("unit_dot", "unit 0 dot-product cycles",
+               [](const ProbeContext& context) {
+                   return unit_state(context) == kUnitDot;
+               });
+    probes.add("unit_post", "unit 0 FP post-processing cycles",
+               [](const ProbeContext& context) {
+                   const int state = unit_state(context);
+                   return state >= kUnitFpConv && state <= kUnitOutputData;
+               });
+    probes.add("idma_stall", "input row waiting for array",
+               [](const ProbeContext& context) {
+                   return core_idma_valid(context) && !core_idma_ready(context);
+               });
+    probes.add("idma_starve", "array waiting for input row",
+               [](const ProbeContext& context) {
+                   return !core_idma_valid(context) && core_idma_ready(context);
+               });
+    probes.add("idma_starve_int8", "array waiting for input row, INT8 compute",
+               [](const ProbeContext& context) {
+                   return !core_idma_valid(context) && core_idma_ready(context) &&
+                          controller_input_int8(context);
+               });
+    probes.add("idma_starve_fp32", "array waiting for input row, FP32 compute",
+               [](const ProbeContext& context) {
+                   return !core_idma_valid(context) && core_idma_ready(context) &&
+                          !controller_input_int8(context);
+               });
+    probes.add("iqbuf_prep", "input row receive/scan/quantize",
+               [](const ProbeContext& context) {
+                   const int state = iqbuf_state(context);
+                   return state >= kIqCommand && state <= kIqQuantize;
+               });
+    probes.add("fp32_scan", "FP32 row max scan",
+               [](const ProbeContext& context) {
+                   return iqbuf_state(context) == kIqScan;
+               });
+    probes.add("fp32_quantize", "FP32 row INT8 quantization",
+               [](const ProbeContext& context) {
+                   return iqbuf_state(context) == kIqQuantize;
+               });
+    probes.add("odma_stall", "result SRAM backpressure on array output",
+               [](const ProbeContext& context) {
+                   return core_odma_valid(context) && !core_odma_ready(context);
+               });
+
+    // Weight load and writeback.
+    probes.add("weight_stream", "weight DMA stream",
+               [](const ProbeContext& context) {
+                   return weight_loader_state(context) == kWeightLoaderStream;
+               });
+    probes.add("writer_sram_wait", "writer SRAM request/return cycles",
+               [](const ProbeContext& context) {
+                   const int state = output_writer_state(context);
+                   return state == kWriterReadRequest || state == kWriterReadReturn;
+               });
+    probes.add("writer_send", "writer DMA data handshake cycles",
+               [](const ProbeContext& context) {
+                   return output_writer_state(context) == kWriterSendData;
+               });
+    probes.add("mem_wr_stall", "writer memory backpressure",
+               [](const ProbeContext& context) {
+                   return output_writer_state(context) == kWriterSendData &&
+                          !mem_wr_data_ready(context);
+               });
+
+    // FSM histograms.
+    probes.add_state("u_top_controller", controller_state, kControllerStateNames);
+    probes.add_state("u_weight_loader", weight_loader_state, kWeightLoaderStateNames);
+    probes.add_state("u_input_quant_buffer", iqbuf_state, kIqbufStateNames);
+    probes.add_state("u_core_array", array_state, kArrayStateNames);
+    probes.add_state("u_core_unit[0]", unit_state, kUnitStateNames);
+    probes.add_state("u_output_accum", output_accum_state, kOutputAccumStateNames);
+    probes.add_state("u_output_writer", output_writer_state, kOutputWriterStateNames);
+}
+
 int listen_on_loopback(std::uint16_t port) {
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -432,7 +864,23 @@ std::uint16_t parse_port(const char* text) {
 }
 
 void print_usage(const char* program) {
-    std::fprintf(stderr, "usage: %s [--port N]\n", program);
+    std::fprintf(stderr,
+                 "usage: %s [--port N] [--no-probes] [--probe-interval N]\n"
+                 "  --port N             TCP port to listen on (default 12345)\n"
+                 "  --no-probes          disable cycle probes and the final report\n"
+                 "  --probe-interval N   print probe deltas every N cycles\n",
+                 program);
+}
+
+std::uint64_t parse_positive(const char* text, const char* option) {
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || value == 0) {
+        std::fprintf(stderr, "remote_sim: %s expects a positive integer, got '%s'\n",
+                     option, text);
+        std::exit(EXIT_FAILURE);
+    }
+    return static_cast<std::uint64_t>(value);
 }
 
 } // namespace
@@ -467,6 +915,8 @@ extern "C" void data_write(unsigned long long address, unsigned long long data,
 
 int main(int argc, char** argv) {
     std::uint16_t port = 12345;
+    bool probes_enabled = true;
+    std::uint64_t probe_interval = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string argument = argv[i];
         if (argument == "-h" || argument == "--help") {
@@ -478,6 +928,14 @@ int main(int argc, char** argv) {
                 return 2;
             }
             port = parse_port(argv[i]);
+        } else if (argument == "--no-probes") {
+            probes_enabled = false;
+        } else if (argument == "--probe-interval") {
+            if (++i >= argc) {
+                std::fprintf(stderr, "remote_sim: --probe-interval requires a value\n");
+                return 2;
+            }
+            probe_interval = parse_positive(argv[i], "--probe-interval");
         } else {
             std::fprintf(stderr, "remote_sim: unknown argument '%s'\n", argument.c_str());
             print_usage(argv[0]);
@@ -519,26 +977,46 @@ int main(int argc, char** argv) {
     dut.reset = 0;
     dut.eval();
 
+    ProbeSet probes;
+    if (probes_enabled)
+        register_probes(probes);
+
     std::uint64_t cycles = 0;
+    std::uint64_t next_probe_report = probe_interval;
+    std::uint64_t host_wait_ns = 0;
     bool command_error = false;
+    const auto wall_start = std::chrono::steady_clock::now();
     while (!context.gotFinish() && cycles < kCycleLimit) {
         if (server.failed())
             break;
 
         // Do not advance simulation time while the core has no work. This
         // keeps the cycle count independent of network and client latency.
+        const auto wait_start = std::chrono::steady_clock::now();
         while (!dut.busy_out && !dut.command_active &&
                !server.has_command() && !server.quit_requested()) {
             if (server.failed())
                 break;
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
+        host_wait_ns += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - wait_start)
+                .count());
         if (server.failed())
             break;
 
         dut.finish = server.quit_requested() ? 1 : 0;
         tick(dut);
         ++cycles;
+
+        if (probes_enabled) {
+            probes.sample(ProbeContext{dut, cycles});
+            if (probe_interval != 0 && cycles >= next_probe_report) {
+                probes.print_delta(cycles);
+                next_probe_report += probe_interval;
+            }
+        }
 
         if (dut.cmd_error_out) {
             server.send_cmd_done(true);
@@ -549,6 +1027,7 @@ int main(int argc, char** argv) {
         if (dut.cmd_done_out)
             server.send_cmd_done(false);
     }
+    const auto wall_end = std::chrono::steady_clock::now();
 
     if (context.gotFinish() && server.quit_requested())
         server.send_quit_ack();
@@ -556,17 +1035,30 @@ int main(int argc, char** argv) {
     g_server = nullptr;
     dut.final();
 
+    int status = 1;
     if (context.gotFinish()) {
         std::printf("remote_sim: finished after %llu cycles\n",
                     static_cast<unsigned long long>(cycles));
-        return 0;
-    }
-    if (command_error)
-        return 1;
-    if (server.failed()) {
+        status = 0;
+    } else if (command_error) {
+        status = 1;
+    } else if (server.failed()) {
         std::fprintf(stderr, "remote_sim: connection or protocol failure\n");
-        return 1;
+    } else {
+        std::fprintf(stderr, "remote_sim: cycle limit reached\n");
     }
-    std::fprintf(stderr, "remote_sim: cycle limit reached\n");
-    return 1;
+
+    if (probes_enabled) {
+        probes.print_summary(cycles);
+        const double wall_seconds =
+            std::chrono::duration<double>(wall_end - wall_start).count();
+        const double wait_seconds = static_cast<double>(host_wait_ns) * 1e-9;
+        std::printf("remote_sim: %.3f s wall, %.0f cycles/s, %.3f s host wait (%.1f%%)\n",
+                    wall_seconds,
+                    wall_seconds > 0.0 ? static_cast<double>(cycles) / wall_seconds : 0.0,
+                    wait_seconds,
+                    wall_seconds > 0.0 ? 100.0 * wait_seconds / wall_seconds : 0.0);
+    }
+
+    return status;
 }
